@@ -1,0 +1,980 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Symphonic Detention: DLC Edition</title>
+    
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <style>
+        @keyframes bob { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-4px) scale(1.02); } }
+        .animate-bob { animation: bob 0.6s infinite ease-in-out; }
+        @keyframes recoil { 0%, 100% { transform: scale(1) translateY(0); } 50% { transform: scale(0.95) translateY(2px); } }
+        .animate-recoil { animation: recoil 0.2s ease-out; }
+        @keyframes spin-note { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .animate-spin-note { animation: spin-note 1s linear infinite; }
+        @keyframes flash-text { 0%, 100% { transform: scale(1) translate(-50%, -50%); text-shadow: 0 0 20px #ef4444; } 50% { transform: scale(1.2) translate(-40%, -40%); text-shadow: 0 0 50px #ef4444; } }
+        .animate-flash-text { animation: flash-text 0.5s infinite; }
+        .custom-scrollbar::-webkit-scrollbar { width: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #1e293b; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        body { margin: 0; padding: 0; background-color: #0f172a; overflow-x: hidden; user-select: none; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans selection:bg-cyan-900">
+    <div id="root" class="min-h-screen py-8"></div>
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+        // ==========================================
+        // 1. GLOBALS & MAPS
+        // ==========================================
+        const MAP_WIDTH = 3000; const MAP_HEIGHT = 3000;
+        function getDistance(x1, y1, x2, y2) { return Math.sqrt((x2-x1)**2 + (y2-y1)**2); }
+        function getMapWalls(levelId) {
+          const w = [ {id: 'bw1', x:0,y:0,w:MAP_WIDTH,h:40, isBorder: true}, {id: 'bw2', x:0,y:MAP_HEIGHT-40,w:MAP_WIDTH,h:40, isBorder: true}, {id: 'bw3', x:0,y:0,w:40,h:MAP_HEIGHT, isBorder: true}, {id: 'bw4', x:MAP_WIDTH-40,y:0,w:40,h:MAP_HEIGHT, isBorder: true} ];
+          if (levelId === 'm_eason_1') { 
+              w.push({id: 'iw1', x:0,y:600,w:1200,h:40, hp: 500, maxHp: 500}, {id: 'iw2', x:1800,y:600,w:1200,h:40, hp: 500, maxHp: 500}); 
+              for(let i=0; i<8; i++) w.push({id: `iw3_${i}`, x:400,y:1200+i*200,w:800,h:40, hp: 300, maxHp: 300}, {id: `iw4_${i}`, x:1800,y:1200+i*200,w:800,h:40, hp: 300, maxHp: 300}); 
+          } else { 
+              w.push({id: 'iw5', x:1000,y:40,w:40,h:800, hp: 600, maxHp: 600}, {id: 'iw6', x:2000,y:2160,w:40,h:800, hp: 600, maxHp: 600}, {id: 'iw7', x:40,y:2000,w:800,h:40, hp: 600, maxHp: 600}, {id: 'iw8', x:2160,y:1000,w:800,h:40, hp: 600, maxHp: 600}); 
+              for(let i=1; i<5; i++) for(let j=1; j<5; j++) { if ((i===2&&j===2)||(i===3&&j===3)||(i===2&&j===3)||(i===3&&j===2)) continue; w.push({id: `gridx_${i}_${j}`, x:i*600, y:j*600-100, w:40, h:200, hp: 400, maxHp: 400}, {id: `gridy_${i}_${j}`, x:i*600-100, y:j*600, w:200, h:40, hp: 400, maxHp: 400}); } 
+          }
+          return w;
+        }
+        function getCollidedWalls(x, y, r, walls) { return walls ? walls.filter(w => x+r > w.x && x-r < w.x+w.w && y+r > w.y && y-r < w.y+w.h) : []; }
+        function checkWallCollision(x, y, r, ign = false, walls = []) { if (x-r < 0 || x+r > MAP_WIDTH || y-r < 0 || y+r > MAP_HEIGHT) return true; if (ign) return false; return getCollidedWalls(x, y, r, walls).length > 0; }
+
+        // ==========================================
+        // 2. AUDIO SYNTHESIZER
+        // ==========================================
+        let audioCtx = null;
+        function initAudio() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.state === 'suspended') audioCtx.resume(); }
+        function playSynthesizer(freq, instId) {
+          if (!audioCtx) return;
+          const now = audioCtx.currentTime; const mGain = audioCtx.createGain(); const filter = audioCtx.createBiquadFilter(); const osc = audioCtx.createOscillator();
+          osc.connect(filter); filter.connect(mGain); mGain.connect(audioCtx.destination);
+          const inst = INSTRUMENTS[instId] || INSTRUMENTS.toot; let dur = 0.5;
+          switch (inst.family) {
+            case 'flute': osc.type='sine'; filter.type='lowpass'; filter.frequency.value=4000; if(instId==='piccolo')freq*=2; dur=0.6; break;
+            case 'clarinet': case 'bassClarinet': osc.type='square'; filter.type='lowpass'; filter.frequency.value=freq*3; if(instId==='bassClarinet')freq/=2; dur=0.5; break;
+            case 'oboe': case 'bassoon': osc.type='sawtooth'; filter.type='bandpass'; filter.frequency.value=1000; if(instId==='bassoon'||instId==='contrabassOboe')freq/=2; if(instId==='contrabassoon'||instId==='contrabassBassoon')freq/=4; dur=0.6; break;
+            case 'sax': case 'sax_straight': osc.type='sawtooth'; filter.type='lowpass'; filter.frequency.setValueAtTime(freq,now); filter.frequency.linearRampToValueAtTime(freq*4,now+0.05); if(instId==='sopranoSax')freq*=1.5; if(instId==='tenorSax')freq/=1.5; if(instId==='baritoneSax')freq/=2.5; if(instId==='contrabassSax')freq/=4; dur=0.6; break;
+            case 'trumpet': case 'trombone': case 'horn': case 'tuba': case 'sousaphone': osc.type=(inst.family==='horn')?'triangle':'sawtooth'; filter.type='lowpass'; filter.frequency.setValueAtTime(0.001,now); filter.frequency.exponentialRampToValueAtTime(freq*8,now+0.08); if(instId.toLowerCase().includes('trombone'))freq/=2; if(instId.includes('contrabassTrombone'))freq/=4; if(instId==='tuba'||instId==='sousaphone')freq/=4; dur=0.6; break;
+            case 'triangle': osc.type='sine'; freq*=4; dur=1.0; break;
+            case 'gun': osc.type='square'; freq=50; dur=0.2; break;
+            case 'throwable': osc.type='sine'; freq=800; dur=0.2; break;
+            default: osc.type='square'; dur=0.5;
+          }
+          mGain.gain.setValueAtTime(0, now); mGain.gain.linearRampToValueAtTime(0.5, now+0.05); mGain.gain.exponentialRampToValueAtTime(0.001, now+dur);
+          if(!['gun','throwable'].includes(inst.family)) osc.frequency.setValueAtTime(freq, now);
+          osc.start(now); osc.stop(now + dur);
+        }
+
+        // ==========================================
+        // 3. GAME DATA (CHARACTERS, INSTRUMENTS, DLC)
+        // ==========================================
+        const CHARACTERS = [
+          { id: 'rocky', name: 'Rocky "The Starter"', lore: "A humble Dood and Toot player.", stats: { hpMultiplier: 1, breathRegen: 1, damageMultiplier: 1, speedMultiplier: 1 }, color: 'text-red-400', hex: '#ef4444', cost: 0, secretAbility: { name: 'Starter Resolve', desc: 'Heals 50 HP.', cost: 30, duration: 2, effect: (s, p) => p.hp = Math.min(p.maxHp, p.hp + 50) } },
+          { id: 'melody', name: 'Melody "The Metronome"', lore: "Hears rhythm in the ticking clock.", stats: { hpMultiplier: 0.8, breathRegen: 1.5, damageMultiplier: 1, speedMultiplier: 1.2 }, color: 'text-pink-400', hex: '#f472b6', cost: 0, secretAbility: { name: 'Tempo Freeze', desc: 'Freezes enemies for 2s.', cost: 40, duration: 2, effect: (s, p) => { s.enemies.forEach(e => e.speed = 0.1); setTimeout(()=>s.enemies.forEach(e => e.speed = e.originalSpeed || 3.5), 2000); } } },
+          { id: 'harmony', name: 'Harmony "Perfect Pitch"', lore: "Surviving finals.", stats: { hpMultiplier: 1.2, breathRegen: 1, damageMultiplier: 1, speedMultiplier: 1 }, color: 'text-blue-400', hex: '#60a5fa', cost: 0, secretAbility: { name: 'Pitch Perfect', desc: 'Destroys enemy projectiles.', cost: 30, duration: 2, effect: (s) => s.enemyProjectiles = [] } },
+          { id: 'rhythm', name: 'Rhythm "Brass Lungs"', lore: "Carries the marching band.", stats: { hpMultiplier: 1, breathRegen: 0.7, damageMultiplier: 1.5, speedMultiplier: 0.8 }, color: 'text-orange-400', hex: '#fb923c', cost: 0, secretAbility: { name: 'Marching Stomp', desc: 'Massive knockback.', cost: 50, duration: 2, effect: (s, p) => s.enemies.forEach(e => { const a = Math.atan2(e.y - p.y, e.x - p.x); e.x += Math.cos(a)*300; e.y += Math.sin(a)*300; }) } },
+          { id: 'treble', name: 'Treble "The Swift"', lore: "Moves at presto tempo.", stats: { hpMultiplier: 0.6, breathRegen: 2, damageMultiplier: 0.8, speedMultiplier: 1.5 }, color: 'text-yellow-300', hex: '#fde047', cost: 1000, secretAbility: { name: 'Presto Dash', desc: 'Lightning dash forward.', cost: 20, duration: 1, effect: (s, p) => { p.x += Math.cos(p.angle)*400; p.y += Math.sin(p.angle)*400; } } },
+          { id: 'bass', name: 'Bass "The Wall"', lore: "Practically indestructible.", stats: { hpMultiplier: 2, breathRegen: 0.5, damageMultiplier: 1.2, speedMultiplier: 0.6 }, color: 'text-stone-500', hex: '#78716c', cost: 1500, secretAbility: { name: 'Wall Shield', desc: 'Invincible for 5s.', cost: 50, duration: 5, effect: (s, p) => { p.isInvincible = true; setTimeout(()=>p.isInvincible=false, 5000); } } },
+          { id: 'keli', name: 'Keli "Jelly King"', lore: "Trombone expert.", stats: { hpMultiplier: 2, breathRegen: 1.5, damageMultiplier: 2, speedMultiplier: 1 }, color: 'text-amber-500', hex: '#f59e0b', cost: 2000, secretAbility: { name: 'Jelly Bounce', desc: 'Fires 8 massive notes.', cost: 40, duration: 2, effect: (s, p) => { for(let i=0; i<8; i++) s.projectiles.push({ id: Math.random(), x: p.x, y: p.y, angle: i*(Math.PI/4), damage: 200, speed: 10, color: 'yellow', shape: 'note', hitCooldowns: new Map(), hits: 10, passWalls: true, homing: true }); } } },
+          { id: 'kai', name: 'Kai "From Dubai"', lore: "Euphonium AoE vibes.", stats: { hpMultiplier: 1.8, breathRegen: 1.5, damageMultiplier: 1, speedMultiplier: 0.7 }, color: 'text-yellow-600', hex: '#ca8a04', cost: 2500, secretAbility: { name: 'Dubai Wealth', desc: 'Triggers a massive explosion. 1-Shots Henchmen.', cost: 60, duration: 3, effect: (s, p) => { s.particles.push({x: p.x, y: p.y, life: 1, shape: 'explosion', color: 'yellow', scale: 5}); s.enemies.forEach(e => { if(getDistance(p.x,p.y,e.x,e.y)<400) { e.hp = e.isBoss ? e.hp - 1500 : 0; } }); } } },
+          { id: 'kashu', name: 'Kashu "The Jazzy"', lore: "Alto Sax improv.", stats: { hpMultiplier: 0.9, breathRegen: 1.2, damageMultiplier: 1.3, speedMultiplier: 1.3 }, color: 'text-yellow-400', hex: '#facc15', cost: 1800, secretAbility: { name: 'Jazz Improv', desc: 'Doubles speed for 4s.', cost: 30, duration: 4, effect: (s, p) => { p.speed *= 2; setTimeout(()=>p.speed/=2, 4000); } } },
+          { id: 'eason', name: 'Eason "Wind Rider"', lore: "Flute master.", stats: { hpMultiplier: 0.8, breathRegen: 3, damageMultiplier: 1.8, speedMultiplier: 2 }, color: 'text-slate-200', hex: '#e2e8f0', cost: 3500, secretAbility: { name: 'Tornado Sweep', desc: 'Doubles projectile damage.', cost: 40, duration: 3, effect: (s) => s.projectiles.forEach(pr => pr.damage *= 2) } },
+          { id: 'thomas', name: 'Thomas "The Herald"', lore: "Trumpet burst damage.", stats: { hpMultiplier: 1, breathRegen: 0.8, damageMultiplier: 1.6, speedMultiplier: 1 }, color: 'text-yellow-500', hex: '#eab308', cost: 1600, secretAbility: { name: 'Herald Call', desc: '+100 Max Breath.', cost: 45, duration: 4, effect: (s, p) => { p.maxBreath += 100; p.breath = p.maxBreath; } } },
+          { id: 'javis', name: 'Javis "The Snake Charmer"', lore: "Clarinet tracking.", stats: { hpMultiplier: 1.1, breathRegen: 1.4, damageMultiplier: 1.1, speedMultiplier: 1.1 }, color: 'text-zinc-400', hex: '#a1a1aa', cost: 1400, secretAbility: { name: 'Snake Bite', desc: 'Hits every enemy on map. 1-Shots Henchmen.', cost: 35, duration: 2, effect: (s) => s.enemies.forEach(e => { e.hp = e.isBoss ? e.hp - 500 : 0; }) } },
+          { id: 'alton', name: 'Alton "The Hitman"', lore: "Silent, deadly, and plays a mean trombone.", stats: { hpMultiplier: 1.2, breathRegen: 1.5, damageMultiplier: 2, speedMultiplier: 1.3 }, color: 'text-red-600', hex: '#b91c1c', cost: 4000, secretAbility: { name: 'BLACK FLASH', desc: 'Devastating punch. 1-Shots Henchmen.', cost: 40, duration: 4, effect: (s, p) => { s.particles.push({x: p.x+Math.cos(p.angle)*100, y: p.y+Math.sin(p.angle)*100, life: 1, shape: 'explosion', color: 'red', scale: 6}); s.enemies.forEach(e => { if(getDistance(p.x,p.y,e.x,e.y)<250) { e.hp = e.isBoss ? e.hp - 2000 : 0; } }); } } },
+          { id: 'socialist_rocky', name: 'Socialist Rocky', lore: "Bringer of the revolution.", stats: { hpMultiplier: 1.5, breathRegen: 1.2, damageMultiplier: 1.5, speedMultiplier: 0.9 }, color: 'text-red-500', hex: '#dc2626', cost: 5000, secretAbility: { name: 'Hammer & Sickle', desc: 'Slashes nearby enemies. 1-Shots Henchmen.', cost: 60, duration: 3, effect: (s, p) => { s.particles.push({x: p.x, y: p.y, life: 1.5, shape: 'sickle', color: 'red', scale: 5}); s.enemies.forEach(e => { if(getDistance(p.x,p.y,e.x,e.y)<200) { e.hp = e.isBoss ? e.hp - 1500 : 0; } }); } } },
+          { id: 'harry', name: 'Harry "The Beastmaster"', lore: "Has treats in his pockets.", stats: { hpMultiplier: 1.1, breathRegen: 1.2, damageMultiplier: 1, speedMultiplier: 1.1 }, color: 'text-stone-400', hex: '#78716c', cost: 4500, secretAbility: { name: 'Hound Swarm', desc: 'Summons hunting dogs.', cost: 50, duration: 2, effect: (s, p) => { for(let i=0; i<2; i++) s.projectiles.push({ id: Math.random(), x: p.x, y: p.y, angle: p.angle+(i===0?-0.5:0.5), targetId: null, damage: 1500, speed: 7, color: 'stone', shape: 'dog', hitCooldowns: new Map(), hits: 5, passWalls: true, homing: true, pierce: 5 }); } } },
+          { id: 'tacops', name: 'Tactical Operation Soldier', lore: "Overpowered Operative.", stats: { hpMultiplier: 5, breathRegen: 3, damageMultiplier: 4, speedMultiplier: 1.8 }, color: 'text-emerald-500', hex: '#065f46', cost: 100000, secretAbility: { name: 'Airstrike', desc: 'Massive map wipe. 1-Shots Henchmen.', cost: 80, duration: 3, effect: (s) => s.enemies.forEach(e => { s.particles.push({x: e.x, y: e.y, life: 1, shape: 'explosion', color: 'orange', scale: 4}); e.hp = e.isBoss ? e.hp - 5000 : 0; }) } },
+        ];
+
+        const INSTRUMENTS = {
+          toot: { name: 'Toot', family: 'clarinet', baseDamage: 8, breathCost: 8, color: 'bg-cyan-200', hex: '#a5f3fc', scale: 0.5, projSpeed: 8, hits: 2, cost: 0 },
+          dood: { name: 'Dood', family: 'clarinet', baseDamage: 12, breathCost: 12, color: 'bg-green-300', hex: '#86efac', scale: 0.6, projSpeed: 4, knockback: 20, hits: 2, cost: 0 },
+          flute: { name: 'Flute', family: 'flute', baseDamage: 35, breathCost: 10, color: 'bg-slate-200', hex: '#e2e8f0', scale: 1, projSpeed: 10, moveSpeedMod: 1.3, hits: 3, cost: 1000 },
+          piccolo: { name: 'Piccolo', family: 'flute', baseDamage: 22, breathCost: 12, color: 'bg-slate-100', hex: '#f1f5f9', scale: 0.5, projSpeed: 12, moveSpeedMod: 1.5, hits: 4, cost: 600, req: 'flute' },
+          oboe: { name: 'Oboe', family: 'oboe', baseDamage: 24, breathCost: 16, color: 'bg-stone-800', hex: '#292524', scale: 0.9, projSpeed: 6, hits: 3, cost: 700 },
+          bassoon: { name: 'Bassoon', family: 'bassoon', baseDamage: 38, breathCost: 22, color: 'bg-red-900', hex: '#7f1d1d', scale: 1.2, projSpeed: 5, knockback: 40, hits: 4, cost: 800 },
+          contrabassoon: { name: 'Contrabassoon', family: 'bassoon', baseDamage: 65, breathCost: 35, color: 'bg-orange-900', hex: '#7c2d12', scale: 1.6, projSpeed: 3, knockback: 70, aoe: 50, hits: 6, cost: 1800, req: 'bassoon' },
+          contrabassBassoon: { name: 'C. Bassoon', family: 'bassoon', baseDamage: 75, breathCost: 38, color: 'bg-red-950', hex: '#450a0a', scale: 1.8, projSpeed: 3, rootPlayer: true, hits: 7, cost: 2200, req: 'bassoon' },
+          clarinet: { name: 'Clarinet', family: 'clarinet', baseDamage: 25, breathCost: 15, color: 'bg-zinc-800', hex: '#27272a', scale: 1, projSpeed: 5, hits: 3, cost: 800 },
+          bassClarinet: { name: 'Bass Clarinet', family: 'bassClarinet', baseDamage: 40, breathCost: 20, color: 'bg-zinc-900', hex: '#18181b', scale: 1.3, projSpeed: 5, hits: 5, cost: 1400, req: 'clarinet' },
+          altoSax: { name: 'Alto Sax', family: 'sax', baseDamage: 35, breathCost: 20, color: 'bg-yellow-400', hex: '#facc15', scale: 1, projSpeed: 6, hits: 4, cost: 1200 },
+          sopranoSax: { name: 'Soprano Sax', family: 'sax_straight', baseDamage: 28, breathCost: 15, color: 'bg-yellow-300', hex: '#fde047', scale: 0.8, projSpeed: 8, hits: 3, cost: 1500, req: 'altoSax' },
+          tenorSax: { name: 'Tenor Sax', family: 'sax', baseDamage: 50, breathCost: 25, color: 'bg-yellow-500', hex: '#eab308', scale: 1.3, projSpeed: 4, knockback: 30, hits: 5, cost: 2000, req: 'altoSax' },
+          baritoneSax: { name: 'Baritone Sax', family: 'sax', baseDamage: 60, breathCost: 30, color: 'bg-yellow-700', hex: '#a16207', scale: 1.7, projSpeed: 4, burst: 3, spread: 0.3, hits: 6, cost: 2500, req: 'tenorSax' },
+          contrabassSax: { name: 'C. Sax', family: 'sax', baseDamage: 90, breathCost: 40, color: 'bg-yellow-800', hex: '#854d0e', scale: 2.2, projSpeed: 3, hits: 8, cost: 3500, req: 'baritoneSax' },
+          trumpet: { name: 'Trumpet', family: 'trumpet', baseDamage: 45, breathCost: 25, color: 'bg-yellow-500', hex: '#eab308', scale: 1, projSpeed: 10, burst: 3, spread: 0.15, hits: 2, cost: 1500 },
+          flugelhorn: { name: 'Flugelhorn', family: 'trumpet', baseDamage: 40, breathCost: 22, color: 'bg-yellow-600', hex: '#ca8a04', scale: 1.2, projSpeed: 7, burst: 5, spread: 0.25, hits: 3, cost: 1800, req: 'trumpet' },
+          frenchHorn: { name: 'French Horn', family: 'horn', baseDamage: 35, breathCost: 25, color: 'bg-amber-400', hex: '#fbbf24', scale: 1, projSpeed: 7, hits: 3, cost: 1200 },
+          mellophone: { name: 'Mellophone', family: 'horn', baseDamage: 45, breathCost: 20, color: 'bg-yellow-400', hex: '#facc15', scale: 1.1, projSpeed: 9, hits: 3, cost: 1400, req: 'frenchHorn' },
+          trombone: { name: 'Trombone', family: 'trombone', baseDamage: 55, breathCost: 35, color: 'bg-amber-600', hex: '#d97706', scale: 1.5, projSpeed: 7, rootPlayer: true, hits: 5, cost: 'Quest' },
+          contrabassTrombone: { name: 'C. Trombone', family: 'trombone', baseDamage: 85, breathCost: 45, color: 'bg-amber-800', hex: '#92400e', scale: 2, projSpeed: 4, rootPlayer: true, hits: 8, cost: 2800, req: 'trombone' },
+          euphonium: { name: 'Euphonium', family: 'tuba', baseDamage: 80, breathCost: 45, color: 'bg-yellow-600', hex: '#ca8a04', scale: 0.9, projSpeed: 3, aoe: 100, hits: 2, cost: 3000 },
+          tuba: { name: 'Tuba', family: 'tuba', baseDamage: 120, breathCost: 50, color: 'bg-yellow-500', hex: '#eab308', scale: 1.3, projSpeed: 4, rootPlayer: true, aoe: 150, hits: 3, cost: 1600 },
+          sousaphone: { name: 'Sousaphone', family: 'sousaphone', baseDamage: 90, breathCost: 45, color: 'bg-yellow-100', hex: '#fef3c7', scale: 1.4, projSpeed: 4, aoe: 120, moveSpeedMod: 0.8, hits: 4, cost: 2500, req: 'tuba' },
+          contrabassOboe: { name: 'C. Oboe', family: 'oboe', baseDamage: 60, breathCost: 28, color: 'bg-stone-950', hex: '#0c0a09', scale: 1.4, projSpeed: 5, hits: 5, cost: 1800, req: 'oboe' },
+          egg: { name: 'Egg', family: 'throwable', baseDamage: 10, breathCost: 0, color: 'bg-orange-100', hex: '#ffedd5', scale: 0.5, projSpeed: 12, passWalls: true, hits: 1, cost: 0 },
+          goldenKazoo: { name: 'Golden Kazoo', family: 'clarinet', baseDamage: 250, breathCost: 5, color: 'bg-yellow-300', hex: '#fef08a', scale: 0.4, projSpeed: 15, passWalls: true, hits: 10, cost: 10000 },
+          diamondTriangle: { name: 'D. Triangle', family: 'triangle', baseDamage: 150, breathCost: 8, color: 'bg-cyan-100', hex: '#cffafe', scale: 0.6, projSpeed: 18, hits: 8, cost: 25000 },
+          desertEagle: { name: 'Desert Eagle', family: 'gun', baseDamage: 9999, breathCost: 0, color: 'bg-stone-600', hex: '#57534e', scale: 0.7, projSpeed: 25, passWalls: true, hits: 1, cost: 50000, shape: 'bullet' }
+        };
+
+        const TEACHER_NAMES = [ "Mr. Smith", "Anson C The Traitor", "Mrs. Robinson", "Mr. Medina", "Coach Hector", "Mrs. Gable", "Principal Skinner", "Ms. Palette", "Mr. Forte", "Mrs. Shush", "Hackerman", "Dr. Beaker", "Mr. Atlas", "Ms. Drama", "Mr. Saw", "Nurse Joyless", "Groundskeeper", "Mrs. Path", "Vice Principal", "Dr. Overlord", "The Board", "Mr. Calculus", "Coach Bench", "Madame Francais", "Dr. Quantum", "Mrs. Melisma", "Mr. Treble", "The Secretary", "Vice Principal Doom", "The Superintendent", "The Mayor", "The Governor", "Sec. of Education", "The President", "Earth Guardian", "Galactic Principal", "Quantum Overlord", "Time Keeper", "Reality Weaver", "The Void Master" ];
+        const SUBJECTS = [ "Mathematics", "Betrayal", "History", "Advanced Science", "P.E.", "Literature", "Detention", "Art", "Rogue Band", "Library", "IT Support", "Chemistry", "Geography", "Theater", "Woodshop", "Infirmary", "Maintenance", "Guidance", "Discipline", "Superintendent", "Final Exams", "Calculus", "Varsity P.E.", "French", "Physics", "Choir", "Elite Band", "Front Office", "Expulsion", "District Overlord", "City Rules", "State Law", "Federal Law", "National Order", "Global Dominance", "Cosmic Detention", "Multiverse Laws", "Temporal Limits", "String Theory", "Absolute Nothing" ];
+
+        const STANDARD_LEVELS = [...Array(40)].map((_, i) => {
+          let hp = 500*Math.pow(1.2, i); let dmg = 10 + i*5; let hench = 10 + i*5; let spd = 1.5; let rwd = 500*Math.pow(1.1, i);
+          if (i === 3) { hp = 5000; dmg = 50; hench = 50; spd = 4.0; rwd = 5000; } 
+          return { id: i+1, teacher: TEACHER_NAMES[i] || `Boss ${i+1}`, subject: SUBJECTS[i] || `Subject ${i+1}`, hp: hp, damage: dmg, henchmenCount: hench, reward: rwd, speed: spd, glassesType: ['round','square','cat','sport','thick'][i%5], shirtColor: ['#3b82f6','#ef4444','#8b5cf6','#10b981','#f59e0b'][i%5] };
+        });
+
+        const DLC_LEVELS = [...Array(50)].map((_, i) => ({
+          id: 41 + i + 1, teacher: `Brainrot Overlord ${i+1}`, subject: `Skibidi Studies ${i+1}`,
+          hp: 15000 * Math.pow(1.1, i), damage: 50 + i*10, henchmenCount: 20 + i*2, reward: 5000, speed: 2.0, glassesType: 'thick', shirtColor: '#84cc16', isDLC: true
+        }));
+
+        const ALL_LEVELS = [...STANDARD_LEVELS, ...DLC_LEVELS];
+
+        const HENCHMEN_TYPES = [
+          { typeId: 'goon', hp: 40, speed: 3.5, damage: 5, radius: 15 }, { typeId: 'thug', hp: 80, speed: 2, damage: 10, radius: 20 }, 
+          { typeId: 'soundproofer', hp: 150, speed: 1.5, damage: 15, radius: 25 }, { typeId: 'linebacker', hp: 100, speed: 2.5, damage: 30, radius: 20 }, 
+          { typeId: 'quarterback', hp: 60, speed: 3, damage: 15, radius: 18 }, { typeId: 'angry_student', hp: 1, speed: 4.5, damage: 8, radius: 12 },
+          { typeId: 'brainrot_kid', hp: 200, speed: 4, damage: 30, radius: 15, isBrainrot: true }
+        ];
+        
+        const MISSIONS = [ 
+          { id: 'm_eason_1', giver: 'Eason', title: 'The Egg Drop', desc: 'Sneak past Kashu\'s guards and drop an egg on him during his class rep speech!', rewardType: 'reeds', rewardAmount: 10000, rewardText: '10000 Reeds', levelData: { id: 'm_eason_1', teacher: 'Kashu', subject: 'Speech', hp: 3000, damage: 50, henchmenCount: 15, reward: 10000, glassesType: 'square', shirtColor: '#facc15', bossSpawnsImmediately: true, bossBehavior: 'speech', customHenchmen: ['soundproofer'] } },
+          { id: 'm_eason_2', giver: 'Eason', title: 'Flute Supremacy', desc: 'Prove that Flutes are the best. Defeat a giant brass boss and his minions.', rewardType: 'reeds', rewardAmount: 15000, rewardText: '15000 Reeds', levelData: { id: 'm_eason_2', teacher: 'Brass Titan', subject: 'Heavy Metal', hp: 15000, damage: 200, henchmenCount: 50, reward: 15000, glassesType: 'thick', shirtColor: '#eab308' } },
+          { id: 'm_kashu_1', giver: 'Kashu', title: 'Gridiron Sabotage', desc: 'Eason is at the football game. Dodge the charging Linebackers and passing Quarterbacks to take him down.', rewardType: 'reeds', rewardAmount: 10000, rewardText: '10000 Reeds', levelData: { id: 'm_kashu_1', teacher: 'Eason (Quarterback)', subject: 'Football Match', hp: 4000, damage: 60, henchmenCount: 20, reward: 10000, glassesType: 'sport', shirtColor: '#e2e8f0', bossSpawnsImmediately: true, customHenchmen: ['linebacker', 'quarterback'] } },
+          { id: 'm_kashu_2', giver: 'Kashu', title: 'Jazz Club Bounce', desc: 'Survive in a tiny room full of fast Metronome Thugs for the sake of improv!', rewardType: 'reeds', rewardAmount: 12000, rewardText: '12000 Reeds', levelData: { id: 'm_kashu_2', teacher: 'Jazz Enforcer', subject: 'Improv Survival', hp: 8000, damage: 100, henchmenCount: 60, reward: 12000, glassesType: 'round', shirtColor: '#a16207', customHenchmen: ['thug'] } },
+          { id: 'm_melody_1', giver: 'Melody', title: 'Protect the Tempo', desc: 'Defeat a massive swarm of 80 Metronome Thugs. Keep the rhythm steady!', rewardType: 'reeds', rewardAmount: 8000, rewardText: '8000 Reeds', levelData: { id: 'm_melody_1', teacher: 'Maestro Clock', subject: 'Tempo Maintenance', hp: 5000, damage: 50, henchmenCount: 80, reward: 8000, glassesType: 'round', shirtColor: '#f472b6', customHenchmen: ['thug'] } },
+          { id: 'm_thomas_1', giver: 'Thomas', title: 'Herald\'s Duel', desc: 'A 1-on-1 duel with an incredibly fast and deadly Trumpet clone.', rewardType: 'reeds', rewardAmount: 15000, rewardText: '15000 Reeds', levelData: { id: 'm_thomas_1', teacher: 'Shadow Thomas', subject: 'Trumpet Duel', hp: 20000, damage: 300, henchmenCount: 0, reward: 15000, glassesType: 'sport', shirtColor: '#000000', bossSpawnsImmediately: true } },
+          { id: 'm_janitor_1', giver: 'Janitor Joe', title: 'The Big Spill', desc: 'The hallways are flooded with angry fans! Defeat 100 of them before facing the Principal.', rewardType: 'reeds', rewardAmount: 20000, rewardText: '20000 Reeds', levelData: { id: 'm_janitor_1', teacher: 'Principal Mess', subject: 'Hallway Cleanup', hp: 10000, damage: 80, henchmenCount: 100, reward: 20000, glassesType: 'thick', shirtColor: '#166534', customHenchmen: ['angry_student'] } }
+        ];
+
+        const QUESTS = [
+          { id: 'q_brass', giver: 'Kai & Keli', title: 'The Brass Challenge', desc: '"Take out 50 Earplug Goons and we\'ll slide you a secret weapon from the band room."', target: 50, metric: 'goonsKilled', rewardType: 'instrument', rewardId: 'trombone', rewardText: 'Trombone Instrument' },
+          { id: 'q_chosen', giver: 'Eason', title: 'The Chosen One', desc: '"Eliminate 5 rival Teachers (Bosses) to secure my victory!"', target: 5, metric: 'bossesDefeated', rewardType: 'reeds', rewardAmount: 5000, rewardText: '5000 Reeds' },
+          { id: 'q_jazz', giver: 'Kashu', title: 'Jazz Rebellion', desc: '"Smash 30 Metronome Thugs for the sake of improv!"', target: 30, metric: 'thugsKilled', rewardType: 'reeds', rewardAmount: 2500, rewardText: '2500 Reeds' },
+          { id: 'q_herald', giver: 'Thomas', title: 'Herald\'s Request', desc: '"Soundproofers are blocking my fanfare. Take down 20 of them!"', target: 20, metric: 'soundproofersKilled', rewardType: 'reeds', rewardAmount: 3000, rewardText: '3000 Reeds' }
+        ];
+        
+        const NOTES = [
+          { name: 'C4', freq: 261.63, key: 't', isBlack: false }, { name: 'C#4', freq: 277.18, key: '5', isBlack: true },
+          { name: 'D4', freq: 293.66, key: 'y', isBlack: false }, { name: 'D#4', freq: 311.13, key: '6', isBlack: true },
+          { name: 'E4', freq: 329.63, key: 'u', isBlack: false }, { name: 'F4', freq: 349.23, key: 'i', isBlack: false },
+          { name: 'F#4', freq: 369.99, key: '8', isBlack: true }, { name: 'G4', freq: 392.00, key: 'o', isBlack: false },
+          { name: 'G#4', freq: 415.30, key: '9', isBlack: true }, { name: 'A4', freq: 440.00, key: 'p', isBlack: false },
+          { name: 'A#4', freq: 466.16, key: '0', isBlack: true }, { name: 'B4', freq: 493.88, key: '[', isBlack: false },
+          { name: 'C5', freq: 523.25, key: ']', isBlack: false },
+        ];
+        function getKeyForNote(noteName) { return NOTES.find(n => n.name === noteName)?.key.toUpperCase() || noteName; }
+
+        function spawnNova(engine, p, count, dmg=100) {
+           for(let i=0; i<count; i++) { engine.projectiles.push({ id: Math.random(), x: p.x, y: p.y, angle: (i*(Math.PI*2/count)), targetId: null, damage: dmg, speed: 8, color: 'yellow', shape: 'note', hitCooldowns: new Map(), hits: 5, passWalls: true, homing: true, pierce: 5 }); }
+        }
+        function triggerAoE(engine, x, y, radius, dmg) {
+           engine.particles.push({ x, y, life: 1, shape: 'explosion', color: 'orange', scale: 3 });
+           engine.enemies.forEach(e => { if(getDistance(x,y,e.x,e.y)<radius) { e.hp -= dmg; } });
+        }
+        function spawnOrbiters(engine, p) {
+           for(let i=0; i<4; i++) { engine.projectiles.push({ id: Math.random(), x: p.x, y: p.y, angle: 0, targetId: null, damage: 150, speed: 0, color: 'cyan', shape: 'note', hitCooldowns: new Map(), hits: 99, orbiter: true, orbiterAngle: i*(Math.PI/2), parent: p, life: 5000 }); }
+        }
+
+        const COMBOS = {
+           rocky: { seq: ['C4','D4','C4'], name: 'Toot-Dood Rally', effect: (p) => { p.speed *= 1.2; p.breath = Math.min(p.maxBreath, p.breath + 30); setTimeout(()=>p.speed/=1.2, 3000); } },
+           melody: { seq: ['C4','D4','E4'], name: 'Tempo Heal', effect: (p) => { p.hp = Math.min(p.maxHp, p.hp + 50); } },
+           harmony: { seq: ['C4','E4','G4'], name: 'Perfect Chord', effect: (p) => { p.breath = p.maxBreath; } },
+           rhythm: { seq: ['C4','C4','C4'], name: 'Marching Blast', effect: (p, engine) => { spawnNova(engine, p, 8); } },
+           treble: { seq: ['C5','B4','A4'], name: 'Presto Aura', effect: (p) => { p.speed *= 1.5; setTimeout(()=>p.speed/=1.5, 5000); } },
+           bass: { seq: ['C4','G4','C5'], name: 'Fortissimo', effect: (p) => { p.isInvincible = true; setTimeout(()=>p.isInvincible=false, 3000); } },
+           keli: { seq: ['G4','F4','D4'], name: 'Trombone Slide', effect: (p, engine) => { spawnNova(engine, p, 3, 400); } },
+           kai: { seq: ['C4','C#4','D4'], name: 'Euphoric Boom', effect: (p, engine) => { triggerAoE(engine, p.x, p.y, 300, 200); } },
+           kashu: { seq: ['E4','G4','B4'], name: 'Jazz Riff', effect: (p) => { p.breath = Math.min(p.maxBreath, p.breath + 50); } },
+           eason: { seq: ['C5','A4','F4'], name: 'Tornado Aura', effect: (p, engine) => { spawnOrbiters(engine, p); } },
+           thomas: { seq: ['G4','C5','G4'], name: 'Brass Barrage', effect: (p, engine) => { spawnNova(engine, p, 12); } },
+           javis: { seq: ['F4','A4','C5'], name: 'Snake Charm', effect: (p, engine) => { engine.projectiles.forEach(pr => pr.damage *= 2); } }
+        };
+
+        // ==========================================
+        // 4. ICONS & SVGS
+        // ==========================================
+        const ICONS = { play: '<polygon points="5 3 19 12 5 21 5 3"/>', book: '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/>', users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>', music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>', arrowLeft: '<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>', heart: '<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>', wind: '<path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2"/>', shieldAlert: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>', zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>', volume: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>', store: '<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>', scroll: '<path d="M8 21h12a2 2 0 0 0 2-2v-2H10v2a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v3h4"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M15 8h-5"/><path d="M15 12h-5"/>', target: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>', check: '<path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="m9 12 2 2 4-4"/>', help: '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>', map: '<polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21"/><line x1="9" y1="3" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="21"/>', clipboard: '<rect x="9" y="9" width="6" height="2" rx="1"/><rect x="9" y="13" width="6" height="2" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>', key: '<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>', pistol: '<path d="M19 7h-2L6 8c-1.1 0-2 .9-2 2s.9 2 2 2h3l-1 5c-.3 1.2.6 2.3 1.8 2.5 1.1.2 2.2-.6 2.5-1.8L14 12h5c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2z"/>' };
+        function Ic({ n, s=24, c="" }) { return <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={c} dangerouslySetInnerHTML={{__html: ICONS[n]}} />; }
+
+        function RenderShape({ shape, cClass="", hColor="#fff" }) {
+            if(shape==='flute') return <svg viewBox="0 0 100 100" className={`drop-shadow-md w-full h-full ${cClass}`}><rect x="10" y="45" width="80" height="10" fill={hColor} rx="5" /><circle cx="20" cy="50" r="3" fill="#000" opacity="0.5" /></svg>;
+            if(['clarinet','oboe','bassoon','bassClarinet','contrabassOboe','contrabassBassoon'].includes(shape)) return <svg viewBox="0 0 100 100" className={`drop-shadow-md w-full h-full ${cClass}`}><rect x="45" y="10" width="10" height="80" fill={hColor} rx="2" /><polygon points="42,90 58,90 50,100" fill={hColor} /><rect x="42" y="30" width="16" height="3" fill="#fff" opacity="0.6"/><rect x="42" y="50" width="16" height="3" fill="#fff" opacity="0.6"/></svg>;
+            if(['sax','sax_straight','contrabassSax'].includes(shape)) return <svg viewBox="0 0 100 100" className={`drop-shadow-md w-full h-full ${cClass}`}><path d="M 50 10 Q 50 50 50 70 Q 50 90 30 90" fill="none" stroke={hColor} strokeWidth="15" strokeLinecap="round" strokeLinejoin="round" /><ellipse cx="30" cy="90" rx="15" ry="20" fill={hColor} /><circle cx="30" cy="90" r="10" fill="#451a03" /></svg>;
+            if(['trumpet'].includes(shape)) return <svg viewBox="0 0 100 100" className={`drop-shadow-md w-full h-full ${cClass}`}><rect x="20" y="40" width="50" height="15" fill="none" stroke={hColor} strokeWidth="8" rx="5" /><polygon points="70,35 90,30 90,65 70,60" fill={hColor} /><rect x="40" y="30" width="15" height="10" fill={hColor} /></svg>;
+            if(['horn','mellophone'].includes(shape)) return <svg viewBox="0 0 100 100" className={`drop-shadow-md w-full h-full ${cClass}`}><circle cx="50" cy="50" r="30" fill="none" stroke={hColor} strokeWidth="10" /><path d="M 20 50 Q 10 70 30 90" fill="none" stroke={hColor} strokeWidth="12" /><ellipse cx="30" cy="90" rx="10" ry="15" fill={hColor} transform="rotate(-45 30 90)"/></svg>;
+            if(['tuba','sousaphone'].includes(shape)) return <svg viewBox="0 0 100 100" className={`drop-shadow-md w-full h-full ${cClass}`}><rect x="30" y="40" width="40" height="50" fill="none" stroke={hColor} strokeWidth="12" rx="20" /><path d="M 70 60 Q 90 50 90 20" fill="none" stroke={hColor} strokeWidth="15" /><ellipse cx="90" cy="20" rx="20" ry="10" fill={hColor} /><ellipse cx="90" cy="20" rx="15" ry="5" fill="#451a03" /></svg>;
+            if(['trombone','contrabassTrombone'].includes(shape)) return <svg viewBox="0 0 100 100" className={`drop-shadow-md w-full h-full ${cClass}`}><rect x="30" y="40" width="60" height="10" fill="none" stroke={hColor} strokeWidth="8" rx="5" /><polygon points="10,35 30,40 30,50 10,55" fill={hColor} /></svg>;
+            if(shape==='triangle') return <svg viewBox="0 0 100 100" className={`drop-shadow-md w-full h-full ${cClass}`}><polygon points="50,20 80,80 20,80" fill="none" stroke={hColor} strokeWidth="8" /><line x1="85" y1="30" x2="85" y2="70" stroke={hColor} strokeWidth="5" /></svg>;
+            if(shape==='gun') return <svg viewBox="0 0 100 100" className={`drop-shadow-md w-full h-full ${cClass}`}><rect x="40" y="40" width="10" height="20" fill="#fcd34d" rx="4"/><rect x="38" y="50" width="10" height="30" fill="#57534e" rx="2"/><rect x="37" y="60" width="12" height="20" fill="#1c1917" rx="2"/></svg>;
+
+            const parts = {
+                egg: <><radialGradient id="eggG" cx="30%" cy="30%" r="70%"><stop offset="0%" stopColor="#fff"/><stop offset="100%" stopColor="#e5e5e5"/></radialGradient><ellipse cx="50" cy="50" rx="30" ry="40" fill="url(#eggG)" stroke="#d4d4d8" strokeWidth="2"/></>,
+                bullet: <><rect x="0" y="5" width="25" height="10" fill="#fbbf24" rx="2"/><path d="M 25 5 L 35 10 L 25 15 Z" fill="#f59e0b"/></>,
+                football: <><ellipse cx="50" cy="50" rx="40" ry="25" fill="#92400e" stroke="#78350f" strokeWidth="2" transform="rotate(-20 50 50)" /><line x1="30" y1="50" x2="70" y2="35" stroke="#fff" strokeWidth="4" /><line x1="45" y1="40" x2="50" y2="45" stroke="#fff" strokeWidth="3" /><line x1="55" y1="36" x2="60" y2="41" stroke="#fff" strokeWidth="3" /></>,
+                explosion: <><path d="M 50 5 L 60 40 L 95 30 L 70 55 L 90 90 L 55 75 L 20 95 L 35 60 L 5 40 L 40 45 Z" fill="#ea580c" /><path d="M 50 15 L 57 42 L 85 38 L 65 58 L 78 85 L 53 72 L 25 88 L 38 62 L 15 48 L 42 50 Z" fill="#facc15" /></>,
+                splat: <><path d="M 50 20 Q 70 10 80 30 Q 100 50 80 70 Q 70 90 50 80 Q 30 90 20 70 Q 0 50 20 30 Q 30 10 50 20 Z" fill="#fef08a" opacity="0.8"/><circle cx="50" cy="50" r="15" fill="#eab308" /></>,
+                hit: <><line x1="20" y1="20" x2="80" y2="80" stroke="#ef4444" strokeWidth="15" strokeLinecap="round" /><line x1="80" y1="20" x2="20" y2="80" stroke="#ef4444" strokeWidth="15" strokeLinecap="round" /></>,
+                angry: <><path d="M 20 50 L 50 20 L 80 50 L 50 80 Z" fill="none" stroke="#ef4444" strokeWidth="8" /><line x1="10" y1="10" x2="40" y2="40" stroke="#ef4444" strokeWidth="8" strokeLinecap="round" /><line x1="90" y1="10" x2="60" y2="40" stroke="#ef4444" strokeWidth="8" strokeLinecap="round" /></>,
+                door: <><rect x="20" y="10" width="60" height="90" fill="#451a03" /><rect x="25" y="15" width="50" height="85" fill="#78350f" /><line x1="35" y1="15" x2="35" y2="100" stroke="#451a03" strokeWidth="2" /><line x1="50" y1="15" x2="50" y2="100" stroke="#451a03" strokeWidth="2" /><line x1="65" y1="15" x2="65" y2="100" stroke="#451a03" strokeWidth="2" /><rect x="30" y="20" width="40" height="30" fill="#451a03" /><rect x="30" y="55" width="40" height="40" fill="#451a03" /><circle cx="65" cy="55" r="4" fill="#fbbf24" /></>,
+                sickle: <><path d="M 60 20 A 30 30 0 1 0 80 80 L 70 90 L 60 70 A 20 20 0 1 1 50 30 Z" fill="#ef4444" /><g transform="rotate(45 50 50)"><rect x="45" y="20" width="10" height="60" fill="#ef4444" /><rect x="30" y="10" width="40" height="20" fill="#ef4444" rx="2" /></g></>,
+                dog: <><ellipse cx="50" cy="55" rx="35" ry="20" fill="#78350f" /><circle cx="25" cy="35" r="18" fill="#78350f" /><ellipse cx="12" cy="40" rx="10" ry="12" fill="#451a03" /><circle cx="5" cy="35" r="4" fill="#000" /><ellipse cx="30" cy="20" rx="6" ry="15" fill="#451a03" transform="rotate(30 30 20)" /><ellipse cx="80" cy="45" rx="15" ry="5" fill="#78350f" transform="rotate(-40 80 45)" /><rect x="30" y="70" width="8" height="20" fill="#78350f" rx="4" /><rect x="65" y="70" width="8" height="20" fill="#78350f" rx="4" /></>,
+                note: <><ellipse cx="15" cy="35" rx="8" ry="6" fill="currentColor" transform="rotate(-20 15 35)" /><rect x="21" y="10" width="3" height="25" fill="currentColor" /><path d="M 21 10 Q 35 10 35 25 Q 25 15 24 15" fill="currentColor" /></>
+            };
+            const vBox = shape==='bullet'?"0 0 40 20":shape==='note'?"0 0 50 50":"0 0 100 100";
+            return <svg viewBox={vBox} className={`drop-shadow-md w-full h-full ${cClass}`}>{parts[shape]||parts.note}</svg>;
+        }
+
+        function SvgDefs() {
+           return <defs><linearGradient id="brass-grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stopColor="#fef08a" /><stop offset="40%" stopColor="#eab308" /><stop offset="60%" stopColor="#fef08a" /><stop offset="100%" stopColor="#a16207" /></linearGradient><linearGradient id="wood-grad" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stopColor="#292524" /><stop offset="50%" stopColor="#1c1917" /><stop offset="100%" stopColor="#0c0a09" /></linearGradient><linearGradient id="silver-grad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stopColor="#f8fafc" /><stop offset="50%" stopColor="#cbd5e1" /><stop offset="100%" stopColor="#64748b" /></linearGradient><radialGradient id="glow-goon" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="#fca5a5" /><stop offset="100%" stopColor="#b91c1c" /></radialGradient><radialGradient id="glow-thug" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="#c4b5fd" /><stop offset="100%" stopColor="#5b21b6" /></radialGradient><radialGradient id="glow-linebacker" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="#93c5fd" /><stop offset="100%" stopColor="#1e3a8a" /></radialGradient><radialGradient id="glow-quarterback" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="#93c5fd" /><stop offset="100%" stopColor="#0369a1" /></radialGradient><radialGradient id="glow-angry_student" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="#fdba74" /><stop offset="100%" stopColor="#ea580c" /></radialGradient><radialGradient id="glow-minion" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="#fcd34d" /><stop offset="100%" stopColor="#b45309" /></radialGradient><radialGradient id="glow-soundproofer" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="#cbd5e1" /><stop offset="100%" stopColor="#334155" /></radialGradient><radialGradient id="glow-ally" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="#93c5fd" /><stop offset="100%" stopColor="#2563eb" /></radialGradient><radialGradient id="glow-brainrot_kid" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="#bef264" /><stop offset="100%" stopColor="#4d7c0f" /></radialGradient><radialGradient id="eggGrad" cx="30%" cy="30%" r="70%"><stop offset="0%" stopColor="#fff" /><stop offset="100%" stopColor="#e5e5e5" /></radialGradient></defs>;
+        }
+
+        function CustomPlayerSVG({ char, instId, isP, isW, z=0 }) {
+          const inst = INSTRUMENTS[instId]; const cC = char ? char.hex : '#fff'; const zS = 1+(z/1000); const zT = -z;
+          return (
+            <svg viewBox="0 0 100 100" className={`w-full h-full overflow-visible ${isW?'animate-bob':''}`}>
+              <ellipse cx="50" cy="50" rx={30*(1-z/1000)} ry={20*(1-z/1000)} fill="rgba(0,0,0,0.5)" />
+              <g transform={`translate(0, ${zT}) scale(${zS})`} style={{transformOrigin:'50px 50px'}}>
+                  <g className={isP?'animate-recoil':''} style={{transformOrigin:'50px 50px'}}>
+                    <ellipse cx="50" cy="50" rx="30" ry="20" fill={cC} stroke="#000" strokeWidth="2" opacity="0.9" />
+                    <circle cx="50" cy="50" r="16" fill="#fcd34d" stroke="#000" strokeWidth="2" />
+                    <g transform="translate(43, 45)"><rect width="14" height="6" fill="#000" rx="2"/><rect x="1" y="1" width="12" height="4" fill="#333" rx="1"/><line x1="14" y1="2" x2="20" y2="-2" stroke="#000" strokeWidth="2"/><line x1="0" y1="2" x2="-6" y2="-2" stroke="#000" strokeWidth="2"/></g>
+                    <circle cx="38" cy="65" r="6" fill="#fcd34d" stroke="#000" strokeWidth="1" />
+                    <circle cx="62" cy="65" r="6" fill="#fcd34d" stroke="#000" strokeWidth="1" />
+                    {inst && <g transform={`translate(50, 50) scale(${inst.scale}) translate(-50, -50)`}><g transform="translate(15, 15)"><RenderShape shape={inst.family==='gun'?'bullet':inst.family} hexColor={inst.hex} colorClass={inst.color}/></g></g>}
+                  </g>
+              </g>
+            </svg>
+          );
+        }
+
+        function CustomEnemySVG({ type, isHit }) {
+          const isG = type==='goon'; const isT = type==='thug'; const isS = type==='soundproofer'; const isL = type==='linebacker'; const isQ = type==='quarterback'; const isA = type==='angry_student'; const isAlly = type==='ally'; const isB = type==='brainrot_kid';
+          return (
+            <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-xl animate-bob" style={{transform:isHit?'translate(-5px, 5px)':'none', transition:'all 0.1s'}}>
+              <circle cx="50" cy="50" r="40" fill={`url(#glow-${type})`} stroke="#000" strokeWidth="2" />
+              {isS && <g opacity="0.6">{[...Array(7)].map((_,i)=>[...Array(7)].map((_,j)=>{if(Math.pow(15+i*10-50,2)+Math.pow(15+j*10-50,2)<1200){return <rect key={`${i}-${j}`} x={15+i*10} y={15+j*10} width="9" height="9" fill="#1e293b" rx="2"/>}return null}))}</g>}
+              {(isL||isQ) && <g><path d="M 10 50 Q 50 0 90 50 L 90 70 Q 50 100 10 70 Z" fill="#e2e8f0" opacity="0.9"/><line x1="20" y1="60" x2="80" y2="60" stroke="#000" strokeWidth="4"/><line x1="30" y1="50" x2="30" y2="70" stroke="#000" strokeWidth="4"/><line x1="50" y1="50" x2="50" y2="70" stroke="#000" strokeWidth="4"/><line x1="70" y1="50" x2="70" y2="70" stroke="#000" strokeWidth="4"/></g>}
+              {isB && <g opacity="0.5"><circle cx="20" cy="20" r="10" fill="#bef264"/><circle cx="80" cy="30" r="8" fill="#bef264"/><circle cx="30" cy="80" r="12" fill="#bef264"/></g>}
+              <circle cx="35" cy="40" r="8" fill="#000"/><circle cx="65" cy="40" r="8" fill="#000"/><circle cx="35" cy="40" r="4" fill={isAlly?'#60a5fa':isB?'#bef264':'#ef4444'}/><circle cx="65" cy="40" r="4" fill={isAlly?'#60a5fa':isB?'#bef264':'#ef4444'}/>
+              <line x1="25" y1="30" x2="45" y2="38" stroke="#000" strokeWidth="4" strokeLinecap="round"/><line x1="75" y1="30" x2="55" y2="38" stroke="#000" strokeWidth="4" strokeLinecap="round"/>
+              {isHit ? <circle cx="50" cy="65" r="10" fill="#000" /> : <path d="M 35 65 Q 50 75 65 65" fill="none" stroke="#000" strokeWidth="4" strokeLinecap="round" />}
+              {isG && <g><rect x="0" y="35" width="20" height="30" fill="#ef4444" rx="5"/><rect x="80" y="35" width="20" height="30" fill="#ef4444" rx="5"/><path d="M 10 35 Q 50 -10 90 35" fill="none" stroke="#333" strokeWidth="6"/></g>}
+              {isT && <g><polygon points="50,0 20,30 80,30" fill="#4c1d95"/><line x1="50" y1="30" x2="60" y2="10" stroke="#fff" strokeWidth="4"/><circle cx="60" cy="10" r="4" fill="#fbbf24"/></g>}
+              {isA && <g transform="translate(15, 10)"><RenderShape shape="angry"/></g>}
+              {isAlly && <g><path d="M 25 45 A 25 25 0 0 1 75 45" fill="none" stroke="#1e3a8a" strokeWidth="6" /><rect x="20" y="35" width="10" height="20" fill="#1e3a8a" rx="5" /><rect x="70" y="35" width="10" height="20" fill="#1e3a8a" rx="5" /></g>}
+              {type === 'minion' && <text x="35" y="25" fontSize="20" fill="red" fontWeight="bold">F</text>}
+            </svg>
+          );
+        }
+
+        function TeacherSVG({ gt, sc, isHit }) {
+          return (
+            <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-2xl animate-bob" style={{transform:isHit?'translate(-5px, 5px)':'none', transition:'all 0.1s'}}>
+              <path d="M 20 100 C 20 60, 80 60, 80 100" fill={sc} />
+              <path d="M 40 80 L 50 90 L 60 80 Z" fill="#fff" />
+              <path d="M 45 90 L 50 100 L 55 90 Z" fill="#333" />
+              <circle cx="50" cy="45" r="30" fill="#fcd34d" />
+              <path d="M 20 45 C 20 10, 80 10, 80 45 L 75 35 C 60 15, 40 15, 25 35 Z" fill="#4b5563" />
+              {isHit ? <circle cx="50" cy="62" r="4" fill="#000" /> : <line x1="42" y1="62" x2="58" y2="62" stroke="#000" strokeWidth="3" strokeLinecap="round" />}
+              <g stroke="#000" strokeWidth={gt==='thick'?"5":"3"} fill="none">
+                {gt==='round' && <><circle cx="38" cy="40" r="8"/><circle cx="62" cy="40" r="8"/><line x1="46" y1="40" x2="54" y2="40"/><line x1="30" y1="40" x2="22" y2="35"/><line x1="70" y1="40" x2="78" y2="35"/></>}
+                {gt==='square' && <><rect x="30" y="32" width="16" height="16"/><rect x="54" y="32" width="16" height="16"/><line x1="46" y1="40" x2="54" y2="40"/><line x1="30" y1="40" x2="22" y2="35"/><line x1="70" y1="40" x2="78" y2="35"/></>}
+                {gt==='cat' && <><path d="M 30 40 Q 38 30 46 40 Q 38 48 30 40"/><path d="M 54 40 Q 62 30 70 40 Q 62 48 54 40"/><path d="M 30 40 L 25 30 L 35 35" fill="#000" stroke="none"/><path d="M 70 40 L 75 30 L 65 35" fill="#000" stroke="none"/><line x1="46" y1="40" x2="54" y2="40"/></>}
+                {gt==='sport' && <><path d="M 28 40 Q 38 35 48 40 L 48 44 Q 38 46 28 44 Z" fill="rgba(255,255,255,0.8)" stroke="none"/><path d="M 52 40 Q 62 35 72 40 L 72 44 Q 62 46 52 44 Z" fill="rgba(255,255,255,0.8)" stroke="none"/><line x1="48" y1="40" x2="52" y2="40"/></>}
+                {gt==='half-moon' && <><path d="M 32 42 A 8 8 0 0 0 48 42 Z"/><path d="M 52 42 A 8 8 0 0 0 68 42 Z"/><line x1="48" y1="42" x2="52" y2="42"/></>}
+                {gt==='thick' && <><rect x="28" y="32" width="20" height="16"/><rect x="52" y="32" width="20" height="16"/><line x1="48" y1="40" x2="52" y2="40"/></>}
+              </g>
+            </svg>
+          );
+        }
+
+        // ==========================================
+        // 5. MAIN APP & REACT VIEWS
+        // ==========================================
+        function App() {
+          const [view, setView] = useState('menu'); 
+          const [activeChar, setActiveChar] = useState(CHARACTERS[0]);
+          const [reeds, setReeds] = useState(0);
+          const [unlockedInstruments, setUnlockedInstruments] = useState(['toot', 'dood']);
+          const [unlockedCharacters, setUnlockedCharacters] = useState(['rocky', 'melody', 'harmony', 'rhythm']);
+          const [maxLevelUnlocked, setMaxLevelUnlocked] = useState(1);
+          const [currentLevel, setCurrentLevel] = useState(null);
+          const [gameStats, setGameStats] = useState({ goonsKilled: 0, thugsKilled: 0, soundproofersKilled: 0, bossesDefeated: 0 });
+          const [claimedQuests, setClaimedQuests] = useState([]);
+          const [upgrades, setUpgrades] = useState({ toot: { damageLvl: 0, breathLvl: 0, hitsLvl: 0 }, dood: { damageLvl: 0, breathLvl: 0, hitsLvl: 0 } });
+          const [charUpgrades, setCharUpgrades] = useState({});
+          const [cheatsEnabled, setCheatsEnabled] = useState(false);
+
+          const navigate = useCallback((newView) => { initAudio(); setView(newView); }, []);
+          const addReeds = useCallback((amount) => setReeds(c => c + amount), []);
+          const unlockLevelProgression = useCallback((levelId) => { if (typeof levelId === 'number') setMaxLevelUnlocked(prev => (levelId === prev && levelId < ALL_LEVELS.length) ? levelId + 1 : prev); }, []);
+          const syncQuestStats = useCallback((stats) => { setGameStats(prev => ({ goonsKilled: prev.goonsKilled + (stats.goonsKilled || 0), thugsKilled: prev.thugsKilled + (stats.thugsKilled || 0), soundproofersKilled: prev.soundproofersKilled + (stats.soundproofersKilled || 0), bossesDefeated: prev.bossesDefeated + (stats.bossesDefeated || 0) })); }, []);
+
+          const claimQuest = useCallback((quest) => {
+            if (claimedQuests.includes(quest.id)) return;
+            setClaimedQuests(prev => [...prev, quest.id]);
+            if (quest.rewardType === 'instrument') {
+               if (!unlockedInstruments.includes(quest.rewardId)) { setUnlockedInstruments(prev => [...prev, quest.rewardId]); setUpgrades(prev => ({ ...prev, [quest.rewardId]: { damageLvl: 0, breathLvl: 0, hitsLvl: 0 } })); }
+            } else if (quest.rewardType === 'reeds') { addReeds(quest.rewardAmount); }
+          }, [claimedQuests, unlockedInstruments, addReeds]);
+
+          const buyItem = useCallback((type, id, cost) => {
+            setReeds(currentReeds => {
+              if (currentReeds >= cost) {
+                if (type === 'upgradeDmg') setUpgrades(prev => ({ ...prev, [id]: { ...prev[id], damageLvl: (prev[id]?.damageLvl || 0) + 1 } }));
+                if (type === 'upgradeBrth') setUpgrades(prev => ({ ...prev, [id]: { ...prev[id], breathLvl: (prev[id]?.breathLvl || 0) + 1 } }));
+                if (type === 'upgradeHits') setUpgrades(prev => ({ ...prev, [id]: { ...prev[id], hitsLvl: (prev[id]?.hitsLvl || 0) + 1 } }));
+                if (type === 'charUpgHp') setCharUpgrades(prev => ({ ...prev, [id]: { ...prev[id], hp: (prev[id]?.hp || 0) + 1 } }));
+                if (type === 'charUpgDmg') setCharUpgrades(prev => ({ ...prev, [id]: { ...prev[id], dmg: (prev[id]?.dmg || 0) + 1 } }));
+                if (type === 'charUpgBreath') setCharUpgrades(prev => ({ ...prev, [id]: { ...prev[id], breath: (prev[id]?.breath || 0) + 1 } }));
+                if (type === 'instrument') { if (!unlockedInstruments.includes(id)) { setUnlockedInstruments(prev => [...prev, id]); setUpgrades(prev => ({ ...prev, [id]: { damageLvl: 0, breathLvl: 0, hitsLvl: 0 } })); } }
+                if (type === 'character') { if (!unlockedCharacters.includes(id)) setUnlockedCharacters(prev => [...prev, id]); }
+                return currentReeds - cost;
+              }
+              return currentReeds;
+            });
+          }, [unlockedInstruments, unlockedCharacters]);
+
+          const unlockAll = useCallback(() => {
+             setUnlockedCharacters(CHARACTERS.map(c => c.id));
+             setUnlockedInstruments(Object.keys(INSTRUMENTS).filter(k => k !== 'egg'));
+             Object.keys(INSTRUMENTS).forEach(k => { if(k !== 'egg') setUpgrades(prev => ({ ...prev, [k]: prev[k] || { damageLvl: 0, breathLvl: 0, hitsLvl: 0 } })); });
+          }, []);
+
+          return (
+            <div className="min-h-screen bg-slate-900 text-slate-100 font-sans selection:bg-cyan-900 flex items-center justify-center p-4">
+              <SvgDefs />
+              <div className="w-full max-w-6xl bg-slate-800 rounded-2xl shadow-2xl overflow-hidden border border-slate-700 relative flex flex-col h-[850px]">
+                <div className="bg-slate-950 p-4 border-b border-slate-700 flex justify-between items-center shrink-0 z-20">
+                  <div className="flex items-center gap-2"><Ic n="music" c="text-cyan-400" /><h1 className="text-xl font-bold tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-400">SYMPHONIC DETENTION</h1></div>
+                  <div className="flex items-center gap-6"><div className="flex items-center gap-1 text-green-400 font-bold bg-slate-900 px-3 py-1 rounded-full border border-green-900/50"><Ic n="wind" s={16} /> {reeds} Reeds</div>{view !== 'menu' && view !== 'game' && view !== 'town' && view !== 'secret' && (<button onClick={() => navigate('menu')} className="flex items-center gap-2 text-slate-400 hover:text-white transition"><Ic n="arrowLeft" s={18} /> Menu</button>)}</div>
+                </div>
+
+                <div className={`flex-1 overflow-y-auto custom-scrollbar ${view === 'game' || view === 'town' ? 'overflow-hidden p-0' : 'p-6'}`}>
+                  {view === 'menu' && <MainMenu navigate={navigate} />}
+                  {view === 'tutorial' && <TutorialView navigate={navigate} />}
+                  {view === 'lore' && <LoreView unlockedInstruments={unlockedInstruments} upgrades={upgrades} unlockedCharacters={unlockedCharacters} charUpgrades={charUpgrades} />}
+                  {view === 'chars' && <CharSelect activeChar={activeChar} setActiveChar={setActiveChar} unlockedCharacters={unlockedCharacters} navigate={navigate} />}
+                  {view === 'shop' && <ShopView unlockedInstruments={unlockedInstruments} unlockedCharacters={unlockedCharacters} upgrades={upgrades} buyItem={buyItem} reeds={reeds} isBlackMarketAvailable={false} charUpgrades={charUpgrades} activeChar={activeChar} />}
+                  {view === 'missions' && <MissionsView gameStats={gameStats} claimedQuests={claimedQuests} claimQuest={claimQuest} navigate={navigate} setCurrentLevel={setCurrentLevel} />}
+                  {view === 'levelSelect' && <LevelSelect maxLevelUnlocked={maxLevelUnlocked} setCurrentLevel={setCurrentLevel} navigate={navigate} />}
+                  {view === 'game' && <GameEngine level={currentLevel} character={activeChar} unlockedInstruments={unlockedInstruments} upgrades={upgrades} charUpgrades={charUpgrades} navigate={navigate} unlockLevelProgression={unlockLevelProgression} addReeds={addReeds} syncQuestStats={syncQuestStats} reeds={reeds} buyItem={buyItem} unlockedCharacters={unlockedCharacters} cheatsEnabled={cheatsEnabled} />}
+                  {view === 'town' && <TownEngine unlockedCharacters={unlockedCharacters} navigate={navigate} reeds={reeds} buyItem={buyItem} charUpgrades={charUpgrades} activeChar={activeChar} />}
+                  {view === 'secret' && <SecretView navigate={navigate} addReeds={addReeds} unlockAll={unlockAll} setCheatsEnabled={setCheatsEnabled} />}
+                  {view === 'win' && <WinView level={currentLevel} navigate={navigate} />}
+                  {view === 'lose' && <LoseView level={currentLevel} navigate={navigate} />}
+                </div>
+              </div>
+            </div>
+          );
+        }
+
+        function MainMenu({ navigate }) {
+          return (
+          <div className="flex flex-col items-center justify-center h-full space-y-6 md:mt-0 pb-10">
+            <div className="text-center mb-8"><h2 className="text-6xl font-black text-white mb-4 tracking-tighter">BATTLE OF THE BAND</h2><p className="text-slate-400 max-w-md mx-auto">Your teachers have given you detention. Dodge enemies, shoot smart musical projectiles, and trigger Combos!</p></div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 w-full max-w-4xl">
+              <button onClick={() => navigate('chars')} className="bg-cyan-600 hover:bg-cyan-500 text-white p-4 rounded-xl font-bold flex flex-col items-center gap-2 transition transform hover:scale-105"><Ic n="play" s={32} /> Start Detention</button>
+              <button onClick={() => navigate('town')} className="bg-emerald-700 hover:bg-emerald-600 text-white p-4 rounded-xl font-bold flex flex-col items-center gap-2 transition transform hover:scale-105"><Ic n="map" s={32} /> Visit Town</button>
+              <button onClick={() => navigate('levelSelect')} className="bg-purple-600 hover:bg-purple-500 text-white p-4 rounded-xl font-bold flex flex-col items-center gap-2 transition transform hover:scale-105"><Ic n="book" s={32} /> Class Schedule</button>
+              <button onClick={() => navigate('shop')} className="bg-green-700 hover:bg-green-600 text-white p-4 rounded-xl font-bold flex flex-col items-center gap-2 transition transform hover:scale-105"><Ic n="store" s={32} /> Music Store</button>
+              <button onClick={() => navigate('missions')} className="bg-amber-600 hover:bg-amber-500 text-white p-4 rounded-xl font-bold flex flex-col items-center gap-2 transition transform hover:scale-105"><Ic n="clipboard" s={28} /> Mission Board</button>
+              <button onClick={() => navigate('tutorial')} className="bg-blue-600 hover:bg-blue-500 text-white p-4 rounded-xl font-bold flex flex-col items-center gap-2 transition transform hover:scale-105"><Ic n="help" s={32} /> How to Play</button>
+            </div>
+            <button onClick={() => navigate('secret')} className="text-xs text-slate-500 mt-8 hover:text-white transition uppercase tracking-widest">Secret Access Code</button>
+          </div>
+        )};
+
+        function SecretView({ navigate, addReeds, unlockAll, setCheatsEnabled }) {
+           const [code, setCode] = useState(''); const [unlocked, setUnlocked] = useState(false);
+           const checkCode = () => { if(code === '2049') { setUnlocked(true); setCheatsEnabled(true); } else alert('Access Denied'); };
+           
+           if (!unlocked) return (
+             <div className="h-full flex flex-col items-center justify-center space-y-6"><h2 className="text-3xl font-bold text-red-500 mb-4 tracking-widest"><Ic n="key" c="inline mb-1 mr-2"/> Developer Access</h2><input type="password" value={code} onChange={e=>setCode(e.target.value)} placeholder="Enter Code" className="bg-slate-900 border-2 border-red-900 text-white p-4 rounded text-center text-xl tracking-widest" /><div className="flex gap-4"><button onClick={checkCode} className="bg-red-600 hover:bg-red-500 px-8 py-3 rounded font-bold text-white transition">Submit</button><button onClick={()=>navigate('menu')} className="bg-slate-700 px-8 py-3 rounded font-bold text-white transition">Back</button></div></div>
+           );
+           return (
+             <div className="h-full flex flex-col items-center justify-center space-y-6"><h2 className="text-4xl font-bold text-green-400 mb-8"><Ic n="zap" c="inline mb-1 mr-2"/> Cheats Activated</h2><div className="grid gap-4 w-full max-w-sm"><button onClick={()=>{addReeds(10000); alert('Added 10,000 Reeds!');}} className="bg-slate-800 hover:bg-slate-700 border-2 border-green-500 p-4 rounded-xl font-bold text-green-400 transition">+10,000 Reeds</button><button onClick={()=>{unlockAll(); alert('Unlocked all instruments and characters!');}} className="bg-slate-800 hover:bg-slate-700 border-2 border-yellow-500 p-4 rounded-xl font-bold text-yellow-400 transition">Unlock Everything</button><button onClick={()=>navigate('menu')} className="bg-slate-700 mt-8 px-8 py-3 rounded font-bold text-white transition">Return to Menu</button></div></div>
+           );
+        }
+
+        function TutorialView({ navigate }) {
+          return (
+          <div className="h-full flex flex-col items-center justify-center space-y-8 max-w-2xl mx-auto text-center py-10">
+             <h2 className="text-4xl font-bold text-cyan-400 mb-4">How to Play</h2>
+             <div className="bg-slate-800 p-6 rounded-2xl border border-slate-600 text-left space-y-6 w-full shadow-2xl">
+                <div className="flex items-start gap-4"><div className="bg-slate-700 p-3 rounded-lg shrink-0"><Ic n="zap" c="text-yellow-400"/></div><div><h3 className="font-bold text-xl text-white">1. Movement & Jumping</h3><p className="text-slate-400">Use <strong className="text-white">WASD / Arrow Keys</strong> to move. Hold <strong className="text-white">SHIFT</strong> to sprint (drains breath), and press <strong className="text-white">SPACEBAR</strong> to jump over attacks!</p></div></div>
+                <div className="flex items-start gap-4"><div className="bg-slate-700 p-3 rounded-lg shrink-0"><Ic n="music" c="text-cyan-400"/></div><div><h3 className="font-bold text-xl text-white">2. Playing Music, Combos & Secrets</h3><p className="text-slate-400">Press keys on the <strong className="text-white">T to ] row</strong> to play notes. Play your character's specific 3-note sequence (found in the Lore menu) to trigger massive Combos! Press <strong className="text-white">Q</strong> to activate their Secret Ability.</p></div></div>
+                <div className="flex items-start gap-4"><div className="bg-slate-700 p-3 rounded-lg shrink-0"><Ic n="store" c="text-green-400"/></div><div><h3 className="font-bold text-xl text-white">3. Town & Upgrades</h3><p className="text-slate-400">Defeat enemies to collect <strong className="text-green-400">Reeds</strong>. Visit the Town to talk to NPCs, upgrade characters in the Training Camp, and access the Black Market!</p></div></div>
+             </div>
+             <button onClick={() => navigate('menu')} className="bg-cyan-500 text-white px-10 py-4 rounded-full font-bold text-xl hover:bg-cyan-400 transition transform hover:scale-105 shadow-[0_0_20px_rgba(6,182,212,0.4)]">Back to Menu</button>
+          </div>
+        )};
+
+        function MissionsView({ gameStats, claimedQuests, claimQuest, navigate, setCurrentLevel }) {
+          const [tab, setTab] = useState('missions');
+          return (
+            <div className="space-y-6 pb-10 max-w-4xl mx-auto h-full overflow-y-auto custom-scrollbar pr-2">
+              <h2 className="text-3xl font-bold text-center mb-6 flex items-center justify-center gap-3"><Ic n="clipboard" s={36} c="text-amber-400"/> The Mission Board</h2>
+              <div className="flex justify-center gap-2 mb-6">
+                <button onClick={() => setTab('missions')} className={`px-6 py-2 rounded-full font-bold capitalize transition ${tab === 'missions' ? 'bg-amber-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}>Playable Missions</button>
+                <button onClick={() => setTab('quests')} className={`px-6 py-2 rounded-full font-bold capitalize transition ${tab === 'quests' ? 'bg-amber-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}>Background Quests</button>
+              </div>
+              {tab === 'missions' && (
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {MISSIONS.map(m => (
+                       <div key={m.id} className="bg-slate-800 border-2 border-slate-600 rounded-2xl p-5 relative overflow-hidden flex flex-col hover:border-amber-400 transition"><div className="absolute top-0 right-0 bg-slate-900/50 text-amber-400 text-[10px] px-3 py-1 rounded-bl-xl font-bold tracking-wider">CLIENT: {m.giver}</div><h3 className="text-xl font-bold text-amber-400 mb-1 mt-2">{m.title}</h3><p className="text-sm text-slate-300 italic mb-4 flex-grow">{m.desc}</p><div className="flex items-center justify-between mt-auto pt-4 border-t border-slate-700"><div><span className="text-[10px] text-slate-500 block uppercase font-bold">Reward</span><span className="font-bold text-yellow-500 text-sm flex items-center gap-1"><Ic n="wind" s={14}/>{m.rewardText}</span></div><button onClick={() => { setCurrentLevel(m.levelData); navigate('game'); }} className="bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-1.5 rounded font-bold transition transform hover:scale-105 flex items-center gap-1"><Ic n="play" s={16}/> Start</button></div></div>
+                    ))}
+                 </div>
+              )}
+              {tab === 'quests' && (
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {QUESTS.map(q => {
+                     const progress = Math.min(gameStats[q.metric] || 0, q.target); const isComplete = progress >= q.target; const isClaimed = claimedQuests.includes(q.id);
+                     return (
+                        <div key={q.id} className={`bg-slate-800 border-2 rounded-2xl p-5 relative overflow-hidden flex flex-col ${isClaimed ? 'border-green-500/50 opacity-70' : isComplete ? 'border-yellow-400 shadow-[0_0_15px_rgba(250,204,21,0.2)]' : 'border-slate-600'}`}><div className="absolute top-0 right-0 bg-slate-900/50 text-amber-400 text-[10px] px-3 py-1 rounded-bl-xl font-bold tracking-wider">CLIENT: {q.giver}</div><h3 className="text-xl font-bold text-amber-400 mb-1 mt-2">{q.title}</h3><p className="text-sm text-slate-300 italic mb-4 flex-grow">{q.desc}</p><div className="bg-slate-900 p-3 rounded-xl mb-4"><div className="flex justify-between items-center mb-2 text-sm"><span className="font-bold flex items-center gap-1"><Ic n="target" s={14}/> Progress</span><span className={isComplete ? "text-green-400 font-bold" : "text-slate-400"}>{progress} / {q.target}</span></div><div className="w-full bg-slate-800 rounded-full h-2"><div className={`h-full rounded-full transition-all duration-500 ${isComplete ? 'bg-green-500' : 'bg-slate-600'}`} style={{ width: `${(progress/q.target)*100}%` }}/></div></div><div className="flex items-center justify-between mt-auto"><div><span className="text-[10px] text-slate-500 block uppercase font-bold">Reward</span><span className="font-bold text-yellow-500 text-sm flex items-center gap-1"><Ic n="wind" s={14}/>{q.rewardText}</span></div>{isClaimed ? (<div className="bg-green-500/20 text-green-400 px-3 py-1.5 rounded flex items-center gap-2 font-bold text-sm"><Ic n="check" s={16}/> Claimed</div>) : isComplete ? (<button onClick={() => claimQuest(q)} className="bg-yellow-500 hover:bg-yellow-400 text-slate-900 px-4 py-1.5 rounded font-bold shadow-[0_0_15px_rgba(234,179,8,0.4)] transition transform hover:scale-105">Claim Reward!</button>) : (<div className="bg-slate-700 text-slate-500 px-3 py-1.5 rounded font-bold text-sm">In Progress</div>)}</div></div>
+                     );
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        }
+
+        function ShopView({ unlockedInstruments, unlockedCharacters, upgrades, buyItem, reeds, isBlackMarketAvailable, charUpgrades, activeChar }) {
+          const [tab, setTab] = useState('instruments');
+          const BLACK_MARKET_ITEMS = ['goldenKazoo', 'diamondTriangle', 'desertEagle', 'tacops'];
+          
+          return (
+            <div className="space-y-6 pb-10">
+              <h2 className="text-3xl font-bold text-center mb-2 flex items-center justify-center gap-3"><Ic n="store" c="text-green-400"/> {isBlackMarketAvailable ? 'Black Market' : 'The Music Store'}</h2>
+              <div className="flex justify-center gap-2 mb-6">{['instruments', 'upgrades', 'characters', 'training'].map(t => (<button key={t} onClick={() => setTab(t)} className={`px-6 py-2 rounded-full font-bold capitalize transition ${tab === t ? 'bg-green-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}>{t}</button>))}</div>
+              {tab === 'instruments' && (
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl mx-auto h-96 overflow-y-auto custom-scrollbar pr-2">
+                    {Object.entries(INSTRUMENTS).map(([id, inst]) => { 
+                        if (inst.cost === 0 || inst.cost === 'Quest' || id === 'egg') return null; 
+                        if (!isBlackMarketAvailable && BLACK_MARKET_ITEMS.includes(id)) return null; if (isBlackMarketAvailable && !BLACK_MARKET_ITEMS.includes(id)) return null;
+                        const isUnlocked = unlockedInstruments.includes(id); const reqMet = !inst.req || unlockedInstruments.includes(inst.req); 
+                        return (
+                            <div key={id} className={`p-4 rounded-xl border flex items-center justify-between transition ${isUnlocked ? 'bg-slate-800/50 border-green-500/30' : 'bg-slate-800 border-slate-600'}`}><div className="flex items-center gap-4"><div className={`w-12 h-12 rounded-full ${inst.color} flex items-center justify-center shrink-0`}><RenderShape shape={inst.family === 'gun' ? 'bullet' : inst.family} hexColor={inst.color.includes('white') ? '#fff' : '#000'} colorClass={inst.color} /></div><div><h3 className="font-bold text-lg">{inst.name}</h3><p className="text-xs text-slate-400">{inst.description}</p>{!reqMet && <p className="text-xs text-red-400 mt-1">Requires: {INSTRUMENTS[inst.req].name}</p>}</div></div><div>{isUnlocked ? (<span className="text-green-400 font-bold px-3 py-1 bg-green-500/10 rounded text-sm">Owned</span>) : (<button onClick={() => buyItem('instrument', id, inst.cost)} disabled={reeds < inst.cost || !reqMet} className={`px-4 py-2 rounded font-bold flex items-center gap-2 transition ${reeds >= inst.cost && reqMet ? 'bg-green-600 hover:bg-green-500 text-white' : 'bg-slate-700 text-slate-500 cursor-not-allowed'}`}><Ic n="wind" s={16}/> {inst.cost}</button>)}</div></div>
+                        )
+                    })}
+                 </div>
+              )}
+              {tab === 'upgrades' && (
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl mx-auto h-96 overflow-y-auto custom-scrollbar pr-2">
+                    {unlockedInstruments.filter(id=>id!=='egg').map(instId => { 
+                       const inst = INSTRUMENTS[instId]; const upg = upgrades[instId] || { damageLvl: 0, breathLvl: 0, hitsLvl: 0 }; 
+                       const dmgCost = 50 + (upg.damageLvl * 50); const brthCost = 50 + (upg.breathLvl * 50); const hitsCost = 100 + (upg.hitsLvl * 100);
+                       return (
+                          <div key={instId} className="bg-slate-800 p-4 rounded-xl border border-slate-600 flex flex-col">
+                             <div className="flex items-center gap-3 mb-4 border-b border-slate-700 pb-2"><div className="w-8 h-8"><RenderShape shape={inst.family === 'gun' ? 'bullet' : inst.family} hexColor="#fff" colorClass={inst.color} /></div><h3 className="font-bold">{inst.name} Upgrades</h3></div>
+                             <div className="space-y-3 mt-auto">
+                                <div className="flex items-center justify-between bg-slate-900 p-3 rounded-lg"><div><p className="text-sm font-bold text-red-400">Damage (Lvl {upg.damageLvl})</p></div><button onClick={() => buyItem('upgradeDmg', instId, dmgCost)} disabled={reeds < dmgCost} className={`px-3 py-1 rounded text-sm font-bold flex items-center gap-1 transition ${reeds >= dmgCost ? 'bg-green-600 text-white hover:bg-green-500' : 'bg-slate-700 text-slate-500 cursor-not-allowed'}`}><Ic n="wind" s={14}/> {dmgCost}</button></div>
+                                {inst.family !== 'gun' && <div className="flex items-center justify-between bg-slate-900 p-3 rounded-lg"><div><p className="text-sm font-bold text-cyan-400">Breath Eff (Lvl {upg.breathLvl})</p></div><button onClick={() => buyItem('upgradeBrth', instId, brthCost)} disabled={reeds < brthCost} className={`px-3 py-1 rounded text-sm font-bold flex items-center gap-1 transition ${reeds >= brthCost ? 'bg-green-600 text-white hover:bg-green-500' : 'bg-slate-700 text-slate-500 cursor-not-allowed'}`}><Ic n="wind" s={14}/> {brthCost}</button></div>}
+                                <div className="flex items-center justify-between bg-slate-900 p-3 rounded-lg"><div><p className="text-sm font-bold text-yellow-400">Lifespan/Hits (Lvl {upg.hitsLvl})</p></div><button onClick={() => buyItem('upgradeHits', instId, hitsCost)} disabled={reeds < hitsCost} className={`px-3 py-1 rounded text-sm font-bold flex items-center gap-1 transition ${reeds >= hitsCost ? 'bg-green-600 text-white hover:bg-green-500' : 'bg-slate-700 text-slate-500 cursor-not-allowed'}`}><Ic n="wind" s={14}/> {hitsCost}</button></div>
+                             </div>
+                          </div>
+                       )
+                    })}
+                 </div>
+              )}
+              {tab === 'characters' && (
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl mx-auto h-96 overflow-y-auto custom-scrollbar pr-2">
+                    {CHARACTERS.map(c => { 
+                       if (c.cost === 0) return null; if (!isBlackMarketAvailable && BLACK_MARKET_ITEMS.includes(c.id)) return null; if (isBlackMarketAvailable && !BLACK_MARKET_ITEMS.includes(c.id)) return null;
+                       const isUnlocked = unlockedCharacters.includes(c.id); 
+                       return (
+                          <div key={c.id} className={`p-4 rounded-xl border flex items-center justify-between transition ${isUnlocked ? 'bg-slate-800/50 border-green-500/30' : 'bg-slate-800 border-slate-600'}`}><div><h3 className={`font-bold text-lg ${c.color}`}>{c.name}</h3><p className="text-xs text-slate-400 mb-2">{c.lore}</p><div className="text-[10px] space-x-2 bg-slate-900 px-2 py-1 rounded inline-block"><span className="text-green-400">HP:{c.stats.hpMultiplier}x</span><span className="text-yellow-400">SPD:{c.stats.speedMultiplier}x</span><span className="text-red-400">DMG:{c.stats.damageMultiplier}x</span></div></div><div className="shrink-0 ml-4">{isUnlocked ? (<span className="text-green-400 font-bold px-3 py-1 bg-green-500/10 rounded">Owned</span>) : (<button onClick={() => buyItem('character', c.id, c.cost)} disabled={reeds < c.cost} className={`px-4 py-2 rounded font-bold flex items-center gap-2 transition ${reeds >= c.cost ? 'bg-green-600 hover:bg-green-500 text-white' : 'bg-slate-700 text-slate-500 cursor-not-allowed'}`}><Ic n="wind" s={16}/> {c.cost}</button>)}</div></div>
+                       )
+                    })}
+                 </div>
+              )}
+              {tab === 'training' && (
+                 <div className="max-w-xl mx-auto bg-slate-800 p-6 rounded-2xl border border-slate-600"><h3 className="text-xl font-bold mb-4 text-center">Global Character Upgrades</h3><p className="text-sm text-slate-400 text-center mb-6">These upgrades apply endlessly to {activeChar.name}.</p><div className="space-y-4">
+                       {['Hp', 'Dmg', 'Breath'].map(stat => {
+                          const lvl = charUpgrades[activeChar.id]?.[stat.toLowerCase()] || 0; const cost = Math.floor(100 * Math.pow(1.5, lvl)); const labels = { Hp: 'Max Health', Dmg: 'Base Damage', Breath: 'Breath Efficiency' }; const colors = { Hp: 'text-green-400', Dmg: 'text-red-400', Breath: 'text-cyan-400' };
+                          return (<div key={stat} className="flex items-center justify-between bg-slate-900 p-4 rounded-xl border border-slate-700"><div><p className={`font-bold ${colors[stat]}`}>{labels[stat]} (Lvl {lvl})</p></div><button onClick={() => buyItem(`charUpg${stat}`, activeChar.id, cost)} disabled={reeds < cost} className={`px-4 py-2 rounded font-bold flex items-center gap-2 transition ${reeds >= cost ? 'bg-amber-600 hover:bg-amber-500 text-white' : 'bg-slate-700 text-slate-500 cursor-not-allowed'}`}><Ic n="wind" s={16}/> {cost}</button></div>)
+                       })}
+                    </div>
+                 </div>
+              )}
+            </div>
+          );
+        }
+
+        function GameEngine({ level, character, unlockedInstruments, upgrades, charUpgrades, navigate, unlockLevelProgression, addReeds, syncQuestStats, reeds, buyItem, unlockedCharacters, cheatsEnabled }) {
+          const containerRef = useRef(null);
+          
+          const arenaWalls = useMemo(() => getMapWalls(level.id), [level.id]);
+          const myUpgrades = charUpgrades[character.id] || { hp: 0, dmg: 0, breath: 0 };
+          const actualMaxHp = (100 * character.stats.hpMultiplier) + (myUpgrades.hp * 50);
+
+          const [hudHp, setHudHp] = useState(actualMaxHp);
+          const [hudBreath, setHudBreath] = useState(100);
+          const [hudBossHp, setHudBossHp] = useState(level.hp);
+          const [activeInstrument, setActiveInstrument] = useState(level.id === 'm_eason_1' ? 'egg' : unlockedInstruments[0]);
+          const [activeKeys, setActiveKeys] = useState(new Set());
+          const [bossActive, setBossActive] = useState(false);
+          const [renderTick, setRenderTick] = useState(0); 
+          const [gameResult, setGameResult] = useState(null);
+          const [isPaused, setIsPaused] = useState(false);
+          const [showShopInPause, setShowShopInPause] = useState(false);
+          const [comboMessage, setComboMessage] = useState(null);
+          const [specialText, setSpecialText] = useState(null);
+
+          const engine = useRef({
+            player: { x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2, radius: 25, hp: actualMaxHp, maxHp: actualMaxHp, breath: 100, maxBreath: 100, speed: 5 * character.stats.speedMultiplier, isRooted: false, lastHit: 0, angle: 0, isWalking: false, isPlaying: false, playTimer: 0, lastNoteTime: 0, lastMeleeTime: 0, noteHistory: [], isInvincible: false, z: 0, vz: 0, breathRegenPause: 0 },
+            enemies: [], allies: [], projectiles: [], enemyProjectiles: [], particles: [], camera: { x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 }, mouse: { x: 0, y: 0 }, keys: {}, henchmenSpawned: 0, bossSpawned: false, boss: null, door: null, lastSpawnTime: 0, stats: { goonsKilled: 0, thugsKilled: 0, soundproofersKilled: 0, bossesDefeated: 0 }, eggTriggered: false, godMode: false,
+            walls: getMapWalls(level.id).map(w => ({ ...w, hp: 500, maxHp: 500, id: Math.random() }))
+          });
+
+          const activeInstRef = useRef(activeInstrument); useEffect(() => { activeInstRef.current = activeInstrument; }, [activeInstrument]);
+          const pausedRef = useRef(isPaused); useEffect(() => { pausedRef.current = isPaused; }, [isPaused]);
+          const charRef = useRef(character); useEffect(() => { charRef.current = character; }, [character]);
+          const myUpgRef = useRef(myUpgrades); useEffect(() => { myUpgRef.current = myUpgrades; }, [myUpgrades]);
+          const upgRef = useRef(upgrades); useEffect(() => { upgRef.current = upgrades; }, [upgrades]);
+
+          useEffect(() => { if (level.id === 'm_eason_1') { setActiveInstrument('egg'); engine.current.player.y = MAP_HEIGHT - 200; engine.current.camera.y = MAP_HEIGHT - 200; } }, [level]);
+          
+          useEffect(() => { 
+             if (level.isDLC) {
+                 for(let i=0; i<3; i++) {
+                     engine.current.allies.push({ id: Math.random(), x: engine.current.player.x + (Math.random()-0.5)*200, y: engine.current.player.y + (Math.random()-0.5)*200, hp: 500, maxHp: 500, speed: 4, radius: 20, attackTimer: 0 });
+                 }
+             }
+             if (level.bossSpawnsImmediately && !engine.current.bossSpawned) { engine.current.bossSpawned = true; setBossActive(true); const boss = { id: 'boss', name: level.teacher, isBoss: true, x: MAP_WIDTH / 2, y: 300, hp: level.hp, maxHp: level.hp, speed: level.speed || 1.5, damage: level.damage, radius: 40, attackTimer: 0 }; if (level.bossBehavior) boss.behavior = level.bossBehavior; engine.current.enemies.push(boss); engine.current.boss = boss; } 
+          }, [level]);
+
+          useEffect(() => {
+            let animationId; let lastTime = performance.now();
+            const loop = (time) => {
+              if (pausedRef.current) { lastTime = time; animationId = requestAnimationFrame(loop); return; }
+              const dt = (time - lastTime) / 1000; lastTime = time; const state = engine.current;
+              
+              if (state.godMode) state.player.hp = state.player.maxHp;
+
+              if (state.player.hp <= 0 && !gameResult) { setGameResult('lose'); return; }
+              if (state.player.playTimer > 0) state.player.playTimer -= dt; else state.player.isPlaying = false;
+              if (state.eggTriggered) { state.eggTriggered = false; const firstInst = unlockedInstruments.find(i => i !== 'egg'); if (firstInst) setActiveInstrument(firstInst); }
+
+              if (state.player.z > 0 || state.player.vz !== 0) { state.player.z += state.player.vz * dt; state.player.vz -= 1200 * dt; if (state.player.z <= 0) { state.player.z = 0; state.player.vz = 0; } }
+              const isAirborne = state.player.z > 20;
+
+              let dx = 0; let dy = 0; state.player.isWalking = false;
+              if (!state.player.isRooted) {
+                const inst = INSTRUMENTS[activeInstRef.current] || INSTRUMENTS['toot'];
+                let currentSpeed = state.player.speed * (inst.moveSpeedMod || 1.0);
+                if (state.keys['Shift'] && state.player.breath > 10) { currentSpeed *= 1.6; state.player.breath -= 15 * dt; state.player.breathRegenPause = 0.5; }
+                if (state.keys['ArrowUp'] || state.keys['w'] || state.keys['W']) dy -= currentSpeed;
+                if (state.keys['ArrowDown'] || state.keys['s'] || state.keys['S']) dy += currentSpeed;
+                if (state.keys['ArrowLeft'] || state.keys['a'] || state.keys['A']) dx -= currentSpeed;
+                if (state.keys['ArrowRight'] || state.keys['d'] || state.keys['D']) dx += currentSpeed;
+                if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; } 
+                const newX = state.player.x + dx; const newY = state.player.y + dy;
+                
+                if (!checkWallCollision(newX, state.player.y, state.player.radius, false, state.walls)) state.player.x = newX;
+                if (!checkWallCollision(state.player.x, newY, state.player.radius, false, state.walls)) state.player.y = newY;
+                if (dx !== 0 || dy !== 0) { state.player.isWalking = true; if (state.enemies.length === 0) state.player.angle = Math.atan2(dy, dx); }
+              }
+
+              if (checkWallCollision(state.player.x, state.player.y, state.player.radius, false, state.walls)) { state.player.x += (MAP_WIDTH/2 - state.player.x) * 0.05; state.player.y += (MAP_HEIGHT/2 - state.player.y) * 0.05; }
+
+              let nearestDist = Infinity; let nearestTarget = null;
+              state.enemies.forEach(e => { if (e.behavior === 'speech') return; const d = getDistance(state.player.x, state.player.y, e.x, e.y); if (d < nearestDist) { nearestDist = d; nearestTarget = e; } });
+              if (nearestTarget && INSTRUMENTS[activeInstRef.current]?.family !== 'gun' && INSTRUMENTS[activeInstRef.current]?.family !== 'throwable') state.player.angle = Math.atan2(nearestTarget.y - state.player.y, nearestTarget.x - state.player.x);
+
+              if (state.player.breathRegenPause > 0) state.player.breathRegenPause -= dt; else state.player.breath = Math.min(state.player.maxBreath, state.player.breath + (30 * character.stats.breathRegen * dt));
+
+              if (!state.bossSpawned) {
+                if (state.henchmenSpawned < level.henchmenCount && time - state.lastSpawnTime > 1500) {
+                  const allowedTypes = level.isDLC ? ['brainrot_kid'] : (level.customHenchmen || ['goon', 'thug', 'soundproofer']); 
+                  const typeId = allowedTypes[Math.floor(Math.random() * allowedTypes.length)]; const type = HENCHMEN_TYPES.find(h => h.typeId === typeId); const angle = Math.random() * Math.PI * 2; const dist = 600;
+                  let ex = Math.max(50, Math.min(MAP_WIDTH - 50, state.player.x + Math.cos(angle) * dist)); let ey = Math.max(50, Math.min(MAP_HEIGHT - 50, state.player.y + Math.sin(angle) * dist));
+                  if (!checkWallCollision(ex, ey, type.radius, false, state.walls)) { state.enemies.push({ id: Math.random(), ...type, x: ex, y: ey, maxHp: type.hp }); state.henchmenSpawned++; state.lastSpawnTime = time; }
+                } else if (state.henchmenSpawned >= level.henchmenCount && state.enemies.length === 0) {
+                  state.bossSpawned = true; setBossActive(true);
+                  const boss = { id: 'boss', name: level.teacher, isBoss: true, x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 - 300, hp: level.hp, maxHp: level.hp, speed: level.speed || 1.5, damage: level.damage, radius: 40, attackTimer: 0 };
+                  if (level.bossBehavior) boss.behavior = level.bossBehavior; state.enemies.push(boss); state.boss = boss;
+                }
+              }
+
+              state.allies.forEach((ally, aIdx) => {
+                  if(ally.hp <= 0) { state.allies.splice(aIdx, 1); return; }
+                  let nDist = Infinity; let targ = null;
+                  state.enemies.forEach(e => { const d = getDistance(ally.x, ally.y, e.x, e.y); if(d < nDist) { nDist = d; targ = e; } });
+                  if(targ) {
+                      const angle = Math.atan2(targ.y - ally.y, targ.x - ally.x);
+                      let adx = Math.cos(angle) * ally.speed; let ady = Math.sin(angle) * ally.speed;
+                      if(nDist > 200) { ally.x += adx; ally.y += ady; }
+                      ally.attackTimer += dt;
+                      if(ally.attackTimer > 1.0) {
+                          ally.attackTimer = 0;
+                          state.projectiles.push({ id: Math.random(), x: ally.x, y: ally.y, angle: angle, targetId: targ.id, damage: 100, speed: 12, color: 'blue', shape: 'note', hitCooldowns: new Map(), hits: 1, passWalls: false });
+                      }
+                  }
+                  ally.x = Math.max(50, Math.min(MAP_WIDTH - 50, ally.x)); ally.y = Math.max(50, Math.min(MAP_HEIGHT - 50, ally.y));
+              });
+
+              state.enemies.forEach(enemy => {
+                let edx = 0; let edy = 0; const distToPlayer = getDistance(state.player.x, state.player.y, enemy.x, enemy.y); const angle = Math.atan2(state.player.y - enemy.y, state.player.x - enemy.x);
+                if (enemy.isBoss) {
+                    if (enemy.behavior === 'speech') return; 
+                    enemy.attackTimer += dt;
+                    if (enemy.attackTimer > 2.5) {
+                        enemy.attackTimer = 0;
+                        if (Math.random() > 0.5) { for(let i=-1; i<=1; i++) state.enemyProjectiles.push({ id: Math.random(), x: enemy.x, y: enemy.y, angle: angle + (i*0.2), speed: 7, damage: level.damage });
+                        } else { state.enemies.push({ id: Math.random(), typeId: 'minion', isBossMinion: true, x: enemy.x + 50, y: enemy.y, hp: 10, maxHp: 10, speed: 4.5, damage: level.damage/2, radius: 12, color: '#f59e0b' }); state.enemies.push({ id: Math.random(), typeId: 'minion', isBossMinion: true, x: enemy.x - 50, y: enemy.y, hp: 10, maxHp: 10, speed: 4.5, damage: level.damage/2, radius: 12, color: '#f59e0b' }); }
+                    }
+                    edx = Math.cos(angle) * enemy.speed; edy = Math.sin(angle) * enemy.speed;
+                } else if (enemy.typeId === 'linebacker') {
+                    if (!enemy.chargeState) { enemy.chargeState = 'idle'; enemy.timer = 1.0; }
+                    enemy.timer -= dt;
+                    if (enemy.chargeState === 'idle' && enemy.timer <= 0 && distToPlayer < 400) { enemy.chargeState = 'charging'; enemy.timer = 0.8; enemy.chargeAngle = angle; } 
+                    else if (enemy.chargeState === 'charging') { edx = Math.cos(enemy.chargeAngle) * (enemy.speed * 3); edy = Math.sin(enemy.chargeAngle) * (enemy.speed * 3); if (enemy.timer <= 0) { enemy.chargeState = 'cooldown'; enemy.timer = 1.5; } } 
+                    else if (enemy.chargeState === 'cooldown') { edx = Math.cos(angle) * (enemy.speed * 0.5); edy = Math.sin(angle) * (enemy.speed * 0.5); if (enemy.timer <= 0) { enemy.chargeState = 'idle'; enemy.timer = 1.0; } } 
+                    else { edx = Math.cos(angle) * enemy.speed; edy = Math.sin(angle) * enemy.speed; }
+                } else if (enemy.typeId === 'quarterback') {
+                    if (distToPlayer < 300) { edx = -Math.cos(angle) * enemy.speed; edy = -Math.sin(angle) * enemy.speed; } else if (distToPlayer > 400) { edx = Math.cos(angle) * enemy.speed; edy = Math.sin(angle) * enemy.speed; }
+                    if (!enemy.timer) enemy.timer = 2.0; enemy.timer -= dt;
+                    if (enemy.timer <= 0) { state.enemyProjectiles.push({ id: Math.random(), x: enemy.x, y: enemy.y, angle: angle, speed: 8, damage: 15, isFootball: true }); enemy.timer = 2.5; }
+                } else { edx = Math.cos(angle) * enemy.speed; edy = Math.sin(angle) * enemy.speed; if (!enemy.isBossMinion) { edx += (Math.random() - 0.5) * 1; edy += (Math.random() - 0.5) * 1; } }
+                
+                const nx = enemy.x + edx; const ny = enemy.y + edy;
+                let hitWallsX = getCollidedWalls(nx, enemy.y, enemy.radius, state.walls);
+                if (hitWallsX.length > 0) { hitWallsX.forEach(w => { if (!w.isBorder) w.hp -= enemy.damage * dt; }); } else { enemy.x = nx; }
+                let hitWallsY = getCollidedWalls(enemy.x, ny, enemy.radius, state.walls);
+                if (hitWallsY.length > 0) { hitWallsY.forEach(w => { if (!w.isBorder) w.hp -= enemy.damage * dt; }); } else { enemy.y = ny; }
+
+                if (distToPlayer < enemy.radius + state.player.radius && !state.player.isInvincible && !isAirborne) {
+                  if (time - state.player.lastHit > 500) {
+                     const applyDmg = enemy.typeId === 'linebacker' && enemy.chargeState === 'charging' ? enemy.damage * 2 : enemy.damage;
+                     state.player.hp -= applyDmg; state.player.lastHit = time;
+                     const pushX = state.player.x + edx * 10; const pushY = state.player.y + edy * 10;
+                     if (!checkWallCollision(pushX, state.player.y, state.player.radius, false, state.walls)) state.player.x = pushX;
+                     if (!checkWallCollision(state.player.x, pushY, state.player.radius, false, state.walls)) state.player.y = pushY;
+                  }
+                }
+
+                if (enemy.isBrainrot) {
+                    for(let a=state.allies.length-1; a>=0; a--) {
+                        const ally = state.allies[a];
+                        if (getDistance(enemy.x, enemy.y, ally.x, ally.y) < enemy.radius + ally.radius) {
+                            state.particles.push({x: ally.x, y: ally.y, life: 1, shape: 'splat', color: 'green'});
+                            state.allies.splice(a, 1);
+                            state.enemies.push({ id: Math.random(), ...HENCHMEN_TYPES.find(h=>h.typeId==='brainrot_kid'), x: ally.x, y: ally.y, maxHp: 200 });
+                        }
+                    }
+                }
+              });
+
+              state.walls = state.walls.filter(w => w.hp > 0 || w.isBorder);
+
+              for (let i = state.enemyProjectiles.length - 1; i >= 0; i--) {
+                 let ep = state.enemyProjectiles[i]; ep.x += Math.cos(ep.angle) * ep.speed; ep.y += Math.sin(ep.angle) * ep.speed;
+                 if (checkWallCollision(ep.x, ep.y, 5, false, state.walls)) { state.enemyProjectiles.splice(i, 1); continue; }
+                 if (getDistance(ep.x, ep.y, state.player.x, state.player.y) < state.player.radius + 5 && !state.player.isInvincible && !isAirborne) {
+                    if (time - state.player.lastHit > 500) { state.player.hp -= ep.damage; state.player.lastHit = time; }
+                    state.particles.push({ x: ep.x, y: ep.y, life: 1, shape: 'hit', color: 'red' }); state.enemyProjectiles.splice(i, 1);
+                 }
+              }
+
+              for (let i = state.projectiles.length - 1; i >= 0; i--) {
+                let p = state.projectiles[i];
+                if (p.orbiter) { p.orbiterAngle += 0.05; p.x = p.parent.x + Math.cos(p.orbiterAngle) * 80; p.y = p.parent.y + Math.sin(p.orbiterAngle) * 80; p.life -= dt * 1000; if (p.life <= 0) p.hits = 0;
+                } else {
+                   let target = state.enemies.find(e => e.id === p.targetId && e.behavior !== 'speech');
+                   if (target && p.hitCooldowns && (time - (p.hitCooldowns.get(target.id)||0) < 500)) target = null;
+                   
+                   if (!target && state.enemies.length > 0 && p.homing) { target = state.enemies.reduce((nearest, e) => { if (e.behavior === 'speech') return nearest; if (time - (p.hitCooldowns.get(e.id)||0) < 500) return nearest; const d = getDistance(p.x, p.y, e.x, e.y); return (!nearest || d < nearest.d) ? {e, d} : nearest; }, null)?.e; if (target) p.targetId = target.id; }
+                   if (target) { const targetAngle = Math.atan2(target.y - p.y, target.x - p.x); const angleDiff = targetAngle - p.angle; let diff = Math.atan2(Math.sin(angleDiff), Math.cos(angleDiff)); p.angle += diff * 0.15; }
+                   p.x += Math.cos(p.angle) * p.speed; p.y += Math.sin(p.angle) * p.speed;
+                   const allowPass = p.passWalls || (p.shape === 'egg' || p.shape === 'note' || p.shape === 'dog');
+                   if (!allowPass && checkWallCollision(p.x, p.y, 5, false, state.walls)) { state.projectiles.splice(i, 1); continue; }
+                }
+
+                let hit = false;
+                for (let j = state.enemies.length - 1; j >= 0; j--) {
+                  let e = state.enemies[j];
+                  if (getDistance(p.x, p.y, e.x, e.y) < e.radius + 15) {
+                    if (e.behavior === 'speech') {
+                        if (p.shape === 'egg') { e.behavior = 'chase'; state.eggTriggered = true; state.particles.push({ x: e.x, y: e.y, life: 2, shape: 'splat', color: 'yellow', scale: 3 }); for(let k=0; k<30; k++) state.enemies.push({ id: Math.random(), ...HENCHMEN_TYPES.find(h=>h.typeId==='angry_student'), x: e.x + (Math.random()-0.5)*800, y: e.y + (Math.random()-0.5)*800, maxHp: 1 }); hit = true; }
+                    } else if (time - (p.hitCooldowns?.get(e.id)||0) > 500) {
+                        hit = true;
+                        e.hp -= p.damage; if (p.hitCooldowns) p.hitCooldowns.set(e.id, time); if (!p.orbiter) p.hits--; 
+                        if (p.knockback) { const ex = e.x + Math.cos(p.angle) * p.knockback; const ey = e.y + Math.sin(p.angle) * p.knockback; if(!checkWallCollision(ex, e.y, e.radius, false, state.walls)) e.x = ex; if(!checkWallCollision(e.x, ey, e.radius, false, state.walls)) e.y = ey; }
+                        if (p.aoe) { state.enemies.forEach(otherE => { if (otherE.id !== e.id && getDistance(e.x, e.y, otherE.x, otherE.y) < p.aoe) { otherE.hp -= p.damage * 0.5; } }); }
+                        state.particles.push({ x: e.x, y: e.y, life: 1, shape: p.shape === 'egg' ? 'splat' : p.shape, color: p.color });
+                    }
+                    if (!p.pierce || p.hitCooldowns?.size > p.pierce) break; 
+                  }
+                }
+                if (hit && (!p.pierce || p.hitCooldowns?.size > p.pierce) && p.hits <= 0) state.projectiles.splice(i, 1);
+                else if (p.x < -1000 || p.x > MAP_WIDTH + 1000 || p.y < -1000 || p.y > MAP_HEIGHT + 1000) state.projectiles.splice(i, 1);
+              }
+
+              // --- GLOBAL DEATH SWEEP ---
+              for (let j = state.enemies.length - 1; j >= 0; j--) {
+                 let e = state.enemies[j];
+                 if (e.hp <= 0) {
+                     if (e.typeId === 'goon') state.stats.goonsKilled++; else if (e.typeId === 'thug') state.stats.thugsKilled++; else if (e.typeId === 'soundproofer') state.stats.soundproofersKilled++;
+                     addReeds(e.isBoss ? 0 : 5); state.particles.push({ x: e.x, y: e.y, life: 1, shape: 'explosion', color: 'gray', scale: e.isBoss ? 5 : 2 }); state.enemies.splice(j, 1);
+                     if (e.isBoss) { state.stats.bossesDefeated++; state.boss = null; setBossActive(false); state.door = { x: e.x, y: e.y, radius: 40 }; state.enemies = state.enemies.filter(en => !en.isBossMinion && en.typeId !== 'angry_student'); }
+                 }
+              }
+
+              for (let i = state.particles.length - 1; i >= 0; i--) { state.particles[i].life -= dt * 2; state.particles[i].y -= 1; if (state.particles[i].life <= 0) state.particles.splice(i, 1); }
+              if (state.door && getDistance(state.player.x, state.player.y, state.door.x, state.door.y) < state.player.radius + state.door.radius) { cancelAnimationFrame(animationId); unlockLevelProgression(level.id); addReeds(level.reward); syncQuestStats(engine.current.stats); navigate('win'); return; }
+
+              state.camera.x += (state.player.x - state.camera.x) * 0.1; state.camera.y += (state.player.y - state.camera.y) * 0.1;
+              setHudHp(state.player.hp); setHudBreath(state.player.breath); if (state.boss) setHudBossHp(state.boss.hp);
+              setRenderTick(t => t + 1); animationId = requestAnimationFrame(loop);
+            };
+            
+            animationId = requestAnimationFrame(loop);
+            return () => cancelAnimationFrame(animationId);
+          }, [character, level, addReeds, gameResult]);
+
+          const handleMouseShoot = useCallback(() => {
+             if (pausedRef.current) return;
+             if (level.id === 'm_eason_1' && engine.current.boss?.behavior === 'speech') return; 
+             const state = engine.current; const instId = activeInstRef.current; const inst = INSTRUMENTS[instId];
+             const now = performance.now();
+             if (now - state.player.lastNoteTime < (inst.cooldown || 200)) return;
+             if (inst.family !== 'gun' && inst.family !== 'throwable') return;
+
+             const cw = containerRef.current.clientWidth; const ch = containerRef.current.clientHeight;
+             const camX = state.camera.x - cw / 2; const camY = state.camera.y - ch / 2;
+             const targetX = state.mouse.x + camX; const targetY = state.mouse.y + camY;
+             const angle = Math.atan2(targetY - state.player.y, targetX - state.player.x);
+             
+             state.player.angle = angle; playSynthesizer(400, instId); state.player.lastNoteTime = now; state.player.isPlaying = true; state.player.playTimer = 0.2; 
+             const actChar = charRef.current; const mUpgrades = myUpgRef.current;
+             const finalDamage = (inst.baseDamage * actChar.stats.damageMultiplier) + (mUpgrades.dmg * 10);
+
+             state.projectiles.push({ id: Math.random(), x: state.player.x, y: state.player.y, angle: angle, targetId: null, damage: finalDamage, speed: inst.projSpeed, color: inst.color.split('-')[1], shape: inst.shape || 'bullet', hitCooldowns: new Map(), pierce: inst.pierce || 0, passWalls: true, knockback: inst.knockback || 0, aoe: inst.aoe || 0, hits: inst.hits || 1 });
+          }, [character, level.id, charUpgrades]);
+
+          useEffect(() => {
+            const handleKeyDown = (e) => {
+              if (e.key === 'Escape') { setIsPaused(p => !p); setShowShopInPause(false); return; }
+              engine.current.keys[e.key] = true; if (e.repeat) return;
+              if (level.id === 'm_eason_1' && engine.current.boss?.behavior === 'speech') return;
+
+              const num = parseInt(e.key);
+              if (num >= 1 && num <= unlockedInstruments.length) { setActiveInstrument(unlockedInstruments[num-1]); return; }
+
+              const actChar = charRef.current; const mUpgrades = myUpgRef.current;
+              if (e.key.toLowerCase() === 'q' && actChar.secretAbility) {
+                  const state = engine.current;
+                  const finalCost = actChar.secretAbility.cost * Math.pow(0.95, mUpgrades.breath);
+                  if (state.player.breath >= finalCost) {
+                      state.player.breath -= finalCost; state.player.breathRegenPause = 1.0;
+                      actChar.secretAbility.effect(state, state.player);
+                      setSpecialText({ text: actChar.secretAbility.name, timer: actChar.secretAbility.duration || 2 });
+                  }
+                  return;
+              }
+              
+              if (e.code === 'Space') {
+                  e.preventDefault();
+                  const inst = INSTRUMENTS[activeInstRef.current]; const now = performance.now();
+                  if (inst.family === 'gun') {
+                      if (now - engine.current.player.lastMeleeTime < 500) return;
+                      engine.current.player.lastMeleeTime = now;
+                      engine.current.particles.push({ x: engine.current.player.x, y: engine.current.player.y, life: 1, shape: 'explosion', color: 'orange', scale: 4 });
+                      engine.current.enemies.forEach(en => { if (getDistance(engine.current.player.x, engine.current.player.y, en.x, en.y) < 150) { en.hp = en.isBoss ? en.hp - 300 : 0; const kA = Math.atan2(en.y - engine.current.player.y, en.x - engine.current.player.x); en.x += Math.cos(kA) * 150; en.y += Math.sin(kA) * 150; } });
+                  } else if (engine.current.player.z === 0 && engine.current.player.breath >= 15) { engine.current.player.vz = 400; engine.current.player.breath -= 15; engine.current.player.breathRegenPause = 0.5; }
+                  return;
+              }
+              const note = NOTES.find(n => n.key === e.key.toLowerCase()); if (note) playNote(note);
+            };
+            const handleKeyUp = (e) => { engine.current.keys[e.key] = false; if (INSTRUMENTS[activeInstRef.current] && INSTRUMENTS[activeInstRef.current].rootPlayer) engine.current.player.isRooted = false; };
+            window.addEventListener('keydown', handleKeyDown); window.addEventListener('keyup', handleKeyUp);
+            return () => { window.removeEventListener('keydown', handleKeyDown); window.removeEventListener('keyup', handleKeyUp); };
+          }, [unlockedInstruments, level]);
+
+          useEffect(() => {
+             if (specialText) { const timer = setTimeout(() => setSpecialText(null), specialText.timer * 1000); return () => clearTimeout(timer); }
+          }, [specialText]);
+
+          const playNote = useCallback((note) => {
+            if (pausedRef.current) return;
+            const state = engine.current; const instId = activeInstRef.current; const inst = INSTRUMENTS[instId]; 
+            const actChar = charRef.current; const mUpgrades = myUpgRef.current; const uInsts = upgRef.current[instId] || { damageLvl: 0, breathLvl: 0, hitsLvl: 0 };
+            if (inst.family === 'gun' || inst.family === 'throwable') return; 
+            const now = performance.now(); if (now - state.player.lastNoteTime < (inst.cooldown || 200)) return;
+            
+            const finalBreathCost = (inst.breathCost * (1 - uInsts.breathLvl * 0.05)) * Math.pow(0.95, mUpgrades.breath);
+            const finalDamage = ((inst.baseDamage * actChar.stats.damageMultiplier) * (1 + uInsts.damageLvl * 0.1)) + (mUpgrades.dmg * 10);
+            const finalHits = (inst.hits || 2) + (uInsts.hitsLvl || 0);
+
+            if (state.player.breath < finalBreathCost || state.player.hp <= 0) return;
+            playSynthesizer(note.freq, instId);
+            setActiveKeys(prev => new Set(prev).add(note.key)); setTimeout(() => setActiveKeys(prev => { const next = new Set(prev); next.delete(note.key); return next; }), 100);
+
+            state.player.lastNoteTime = now; state.player.breath -= finalBreathCost; state.player.isPlaying = true; state.player.playTimer = 0.2; state.player.breathRegenPause = 0.5;
+            if (inst.rootPlayer) state.player.isRooted = true;
+            state.player.noteHistory.push(note.name); if (state.player.noteHistory.length > 3) state.player.noteHistory.shift();
+            const charCombo = COMBOS[actChar.id];
+            if (charCombo && state.player.noteHistory.length === 3) { if (state.player.noteHistory.join(',') === charCombo.seq.join(',')) { charCombo.effect(state.player, engine.current); setComboMessage(charCombo.name); setTimeout(()=>setComboMessage(null), 2000); state.player.noteHistory = []; } }
+
+            let projShape = 'note'; if (['gun', 'throwable', 'sickle', 'dog'].includes(inst.family)) projShape = inst.shape || inst.family;
+
+            const spawnProj = (angleOffset = 0) => { state.projectiles.push({ id: Math.random(), x: state.player.x, y: state.player.y, angle: state.player.angle + angleOffset, targetId: null, damage: finalDamage, speed: inst.projSpeed, color: inst.color.split('-')[1], shape: projShape, hitCooldowns: new Map(), pierce: inst.pierce || 0, homing: true, passWalls: true, knockback: inst.knockback || 0, aoe: inst.aoe || 0, hits: finalHits }); };
+            const burstCount = inst.burst || 1; const spreadAngle = inst.spread || 0.15;
+            if (burstCount === 1) spawnProj(0); else { const offsetStart = -((burstCount - 1) / 2) * spreadAngle; for (let i = 0; i < burstCount; i++) spawnProj(offsetStart + (i * spreadAngle)); }
+          }, []);
+
+          const s = engine.current; const cw = containerRef.current ? containerRef.current.clientWidth : 800; const ch = containerRef.current ? containerRef.current.clientHeight : 500; const camX = s.camera.x - cw / 2; const camY = s.camera.y - ch / 2;
+
+          return (
+            <div className="h-full flex flex-col relative" ref={containerRef}>
+              {comboMessage && (<div className="absolute top-1/4 left-1/2 transform -translate-x-1/2 z-40 animate-float-up pointer-events-none"><h1 className="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-300 to-red-500 drop-shadow-[0_5px_5px_rgba(0,0,0,1)] tracking-widest italic">COMBO: {comboMessage}!</h1></div>)}
+              {specialText && (<div className="absolute top-1/3 left-1/2 z-40 pointer-events-none animate-flash-text"><h1 className="text-7xl font-black text-transparent bg-clip-text bg-gradient-to-r from-red-600 to-red-400 italic uppercase tracking-tighter" style={{WebkitTextStroke: '2px black'}}>{specialText.text}</h1></div>)}
+
+              {/* CHEAT GUI */}
+              {cheatsEnabled && (
+                <div className="absolute bottom-4 right-4 bg-slate-900/90 border-2 border-red-500 p-3 rounded-xl z-50 shadow-2xl flex flex-col gap-2 w-48 pointer-events-auto" onMouseDown={(e) => e.stopPropagation()}>
+                   <h4 className="font-bold text-red-400 border-b border-red-900 pb-1 text-center text-xs">CHEAT GUI</h4>
+                   <label className="text-white text-xs flex items-center gap-2 cursor-pointer"><input type="checkbox" onChange={(e) => engine.current.godMode = e.target.checked} /> God Mode</label>
+                   <button onClick={() => { const a = Math.random() * Math.PI * 2; engine.current.enemies.push({ id: Math.random(), ...HENCHMEN_TYPES[0], x: engine.current.player.x + Math.cos(a)*200, y: engine.current.player.y + Math.sin(a)*200, maxHp: 40 }); }} className="bg-red-900 hover:bg-red-800 text-white text-[10px] py-1 rounded">Spawn Enemy</button>
+                   <button onClick={() => { const a = Math.random() * Math.PI * 2; engine.current.allies.push({ id: Math.random(), x: engine.current.player.x + Math.cos(a)*100, y: engine.current.player.y + Math.sin(a)*100, hp: 500, maxHp: 500, speed: 4, radius: 20, attackTimer: 0 }); }} className="bg-blue-900 hover:bg-blue-800 text-white text-[10px] py-1 rounded">Spawn Ally</button>
+                   <button onClick={() => { engine.current.enemies.forEach(e => e.hp = -999999); }} className="bg-orange-900 hover:bg-orange-800 text-white text-[10px] py-1 rounded">Nuke Enemies</button>
+                   <button onClick={() => addReeds(10000)} className="bg-green-900 hover:bg-green-800 text-white text-[10px] py-1 rounded">+10k Reeds</button>
+                </div>
+              )}
+
+              {isPaused && (
+                <div className="absolute inset-0 z-50 bg-slate-900/95 overflow-y-auto pt-6 backdrop-blur-md pointer-events-auto flex flex-col items-center">
+                    <div className="w-full max-w-5xl px-6 flex justify-between items-center mb-4">
+                       <h2 className="text-2xl font-bold text-white tracking-widest uppercase flex items-center gap-2"><Ic n="store"/> Game Paused</h2>
+                       <div className="flex items-center gap-4">
+                          <div className="flex items-center gap-1 text-green-400 font-bold bg-slate-800 px-4 py-2 rounded-full shadow-lg border border-green-900/50"><Ic n="wind" s={20} /> {reeds} Reeds</div>
+                          <button onClick={() => setIsPaused(false)} className="bg-green-600 hover:bg-green-500 text-white px-6 py-2 rounded-full font-bold shadow-lg transition transform hover:scale-105">Resume (Esc)</button>
+                          <button onClick={() => navigate('menu')} className="bg-slate-700 hover:bg-slate-600 text-white px-6 py-2 rounded-full font-bold shadow-lg transition transform hover:scale-105">Quit to Menu</button>
+                       </div>
+                    </div>
+                    <div className="w-full max-w-5xl bg-slate-800 p-6 rounded-2xl shadow-2xl border border-slate-700 h-[600px] flex flex-col items-center justify-center gap-6">
+                        {!showShopInPause ? (
+                           <><h2 className="text-5xl font-black tracking-tighter">PAUSED</h2><button onClick={() => setShowShopInPause(true)} className="bg-amber-600 hover:bg-amber-500 px-10 py-4 rounded-full font-bold text-white transition text-xl flex items-center gap-3"><Ic n="store" s={24}/> Open Shop</button></>
+                        ) : (
+                           <div className="w-full h-full relative">
+                              <button onClick={() => setShowShopInPause(false)} className="absolute -top-4 -right-4 bg-red-500 rounded-full w-10 h-10 font-bold z-50">X</button>
+                              <ShopView unlockedInstruments={unlockedInstruments} unlockedCharacters={unlockedCharacters} upgrades={upgrades} buyItem={buyItem} reeds={reeds} isBlackMarketAvailable={false} charUpgrades={charUpgrades} activeChar={character} />
+                           </div>
+                        )}
+                    </div>
+                </div>
+              )}
+
+              <div className="flex-1 overflow-hidden bg-slate-900 relative cursor-crosshair" onMouseMove={(e) => { const r = e.currentTarget.getBoundingClientRect(); engine.current.mouse = { x: e.clientX - r.left, y: e.clientY - r.top }; }} onMouseDown={(e) => { if (['gun', 'throwable'].includes(INSTRUMENTS[activeInstRef.current]?.family)) handleMouseShoot(); }}>
+                <div className="absolute top-0 left-0" style={{ transform: `translate(${-camX}px, ${-camY}px)` }}>
+                  <div className="absolute" style={{ width: MAP_WIDTH, height: MAP_HEIGHT, backgroundImage: 'linear-gradient(#1e293b 1px, transparent 1px), linear-gradient(90deg, #1e293b 1px, transparent 1px)', backgroundSize: '40px 40px', opacity: 0.5 }} />
+                  {s.walls.map(w => (
+                      <div key={w.id} className="absolute bg-slate-700 border border-slate-600 shadow-lg overflow-hidden" style={{ left: w.x, top: w.y, width: w.w, height: w.h }}>
+                         {w.hp < w.maxHp && <div className="absolute inset-0 bg-red-500/50" style={{opacity: 1 - (w.hp/w.maxHp)}}></div>}
+                      </div>
+                  ))}
+                  {s.door && (<div className="absolute flex items-center justify-center text-5xl animate-bounce drop-shadow-2xl" style={{ left: s.door.x - s.door.radius, top: s.door.y - s.door.radius, width: s.door.radius*2, height: s.door.radius*2 }}><RenderShape shape="door" /></div>)}
+
+                  {s.enemies.map(e => {
+                     if (e.isBoss) return (<div key={e.id} className="absolute flex items-center justify-center transition-transform" style={{ left: e.x - e.radius, top: e.y - e.radius, width: e.radius*2, height: e.radius*2 }}><TeacherSVG glassesType={level.glassesType} shirtColor={level.shirtColor} isHit={false} /><div className="absolute -top-4 w-16 h-2 bg-slate-800 rounded"><div className="h-full bg-red-500 rounded" style={{ width: `${Math.max(0, e.hp/e.maxHp)*100}%` }}/></div></div>);
+                     return (<div key={e.id} className="absolute rounded-full shadow-lg flex items-center justify-center" style={{ left: e.x - e.radius, top: e.y - e.radius, width: e.radius*2, height: e.radius*2 }}><CustomEnemySVG typeId={e.typeId} isHit={false} /><div className="absolute -top-3 w-10 h-1 bg-slate-800 rounded"><div className="h-full bg-red-500 rounded" style={{ width: `${Math.max(0, e.hp/e.maxHp)*100}%` }}/></div></div>)
+                  })}
+
+                  {s.allies.map(a => (
+                     <div key={a.id} className="absolute rounded-full shadow-lg flex items-center justify-center" style={{ left: a.x - a.radius, top: a.y - a.radius, width: a.radius*2, height: a.radius*2 }}>
+                        <CustomEnemySVG typeId="ally" isHit={false} />
+                        <div className="absolute -top-3 w-10 h-1 bg-slate-800 rounded"><div className="h-full bg-blue-500 rounded" style={{ width: `${Math.max(0, a.hp/a.maxHp)*100}%` }}/></div>
+                     </div>
+                  ))}
+
+                  <div className="absolute transition-transform duration-75" style={{ left: s.player.x - 50, top: s.player.y - 50, width: 100, height: 100, transform: `rotate(${s.player.angle * 180 / Math.PI}deg)` }}>
+                     {s.player.isInvincible && <div className="absolute inset-0 rounded-full border-4 border-yellow-400 animate-ping opacity-50"/>}
+                     <CustomPlayerSVG character={character} instrumentId={activeInstrument} isPlaying={s.player.isPlaying} isWalking={s.player.isWalking} zOffset={s.player.z} />
+                  </div>
+
+                  {s.projectiles.map(p => {
+                     const isNonSpinning = p.orbiter || p.shape === 'bullet' || p.shape === 'dog';
+                     return (<div key={p.id} className={`absolute drop-shadow-md ${isNonSpinning ? '' : 'animate-spin-note'}`} style={{ left: p.x - 20, top: p.y - 20, width: 40, height: 40 }}><RenderShape shape={p.shape} colorClass={`text-${p.color}-400`} hexColor={p.color === 'yellow' ? '#facc15' : '#fff'} /></div>);
+                  })}
+                  {s.enemyProjectiles.map(p => (<div key={p.id} className="absolute drop-shadow-[0_0_8px_rgba(239,68,68,0.8)] animate-spin-note" style={{ left: p.x - 15, top: p.y - 15, width: 30, height: 30 }}><RenderShape shape={p.isFootball ? 'football' : 'note'} colorClass="text-red-500" /></div>))}
+                  {s.particles.map((p, i) => (<div key={i} className={`absolute drop-shadow-sm font-bold opacity-${Math.floor(p.life*100)}`} style={{ left: p.x - 15, top: p.y - 15, width: 30, height: 30, transform: `scale(${p.scale||1})` }}><RenderShape shape={p.shape} colorClass={`text-${p.color}-400`} /></div>))}
+                </div>
+              </div>
+
+              <div className="absolute top-4 left-4 right-4 flex justify-between pointer-events-none">
+                 <div className="w-48 bg-slate-800/90 p-3 rounded-xl border border-green-900/50 backdrop-blur-sm pointer-events-auto shadow-xl">
+                   <div className="flex justify-between items-center mb-1"><span className="text-xs font-bold text-green-400 flex items-center gap-1"><Ic n="heart" s={12}/> HP</span><span className="text-xs">{Math.ceil(hudHp)} / {Math.ceil(s.player.maxHp)}</span></div>
+                   <div className="h-3 w-full bg-slate-900 rounded-full overflow-hidden"><div className="h-full bg-green-500 transition-all duration-200" style={{ width: `${Math.max(0, (hudHp / s.player.maxHp) * 100)}%` }} /></div>
+                   <div className="flex justify-between items-center mt-2 mb-1"><span className="text-xs font-bold text-cyan-400 flex items-center gap-1"><Ic n="wind" s={12}/> Breath</span></div>
+                   <div className="h-3 w-full bg-slate-900 rounded-full overflow-hidden"><div className="h-full bg-cyan-400 transition-all duration-75" style={{ width: `${hudBreath}%` }} /></div>
+                 </div>
+
+                 {bossActive && (<div className="w-64 bg-slate-900/90 p-3 rounded-xl border border-red-900/50 backdrop-blur-sm pointer-events-auto text-center shadow-xl"><h3 className="font-bold text-red-400">{level.teacher}</h3><p className="text-xs text-slate-400 mb-2">{level.subject}</p><div className="h-4 w-full bg-slate-800 rounded-full overflow-hidden border border-slate-700"><div className="h-full bg-red-500 transition-all duration-200" style={{ width: `${Math.max(0, (hudBossHp / level.hp) * 100)}%` }} /></div></div>)}
+                 {s.door && (<div className="bg-slate-900/90 p-3 rounded-xl border border-green-500/50 backdrop-blur-sm pointer-events-auto text-center shadow-xl h-14"><h3 className="font-bold text-green-400 flex items-center gap-2"><Ic n="zap" s={16}/> Find the Door!</h3></div>)}
+
+                 <div className="flex flex-col items-end gap-2 pointer-events-auto">
+                   <div className="bg-slate-800/80 p-2 px-4 rounded-xl text-sm font-bold shadow-lg text-amber-400 border border-amber-900/50 flex gap-2 items-center">{bossActive ? (level.bossBehavior === 'speech' ? "Sneak past to drop the egg!" : "Defeat the Boss!") : s.door ? "Detention Over!" : `Survive Henchmen: ${level.henchmenCount - s.henchmenSpawned} left`}<span className="text-xs text-slate-400 bg-slate-900 px-2 py-1 rounded">(Esc) Pause</span></div>
+                   <div className="flex gap-2 bg-slate-800/80 p-2 rounded-xl backdrop-blur-sm shadow-xl max-w-sm overflow-x-auto custom-scrollbar">
+                      {unlockedInstruments.map((instId, idx) => {
+                        const inst = INSTRUMENTS[instId];
+                        if (inst.family === 'throwable' && level.id !== 'm_eason_1') return null; 
+                        return (
+                          <button key={instId} onClick={() => { if(level.id !== 'm_eason_1') setActiveInstrument(instId); }} className={`shrink-0 w-14 h-14 rounded-lg flex flex-col items-center justify-center transition-all relative ${activeInstrument === instId ? `ring-2 ring-white scale-110 ${inst.color}` : 'bg-slate-700 opacity-60 hover:opacity-100'}`} title={`${inst.name} (Cost: ${inst.breathCost})`}>
+                            <span className="absolute top-0 right-1 text-[10px] font-bold opacity-75">{idx+1}</span>
+                            <div className="w-8 h-8"><RenderShape shape={inst.family === 'gun' ? 'bullet' : inst.family} hexColor={inst.color.includes('white') ? '#fff' : '#000'} /></div>
+                          </button>
+                        )
+                      })}
+                   </div>
+                 </div>
+              </div>
+
+              <div className="h-48 bg-slate-950 p-4 relative shrink-0 z-10 border-t border-slate-700">
+                <div className="text-center text-xs text-slate-500 mb-2 font-mono flex items-center justify-center gap-2"><Ic n="volume" s={14}/> Use ARROW KEYS to move. Click keys or type (T-Y-U-I...) to play. Shift to Sprint. Space to Jump. Q for Secret Ability.</div>
+                <div className="flex h-full max-h-32 justify-center gap-1 relative px-8">
+                  {NOTES.filter(n => !n.isBlack).map((note) => (<div key={note.name} onMouseDown={() => playNote(note)} className={`flex-1 max-w-[60px] bg-white rounded-b-md border-x border-b border-slate-300 relative cursor-pointer select-none transition-colors duration-75 flex items-end justify-center pb-2 text-slate-400 font-bold text-sm ${activeKeys.has(note.key) ? 'bg-slate-300' : 'hover:bg-slate-100'}`}>{note.key.toUpperCase()}</div>))}
+                  <div className="absolute top-0 left-0 right-0 h-[60%] flex justify-center gap-1 px-8 pointer-events-none">
+                     {NOTES.map((note, i) => {
+                       if (!note.isBlack) return <div key={`spacer-${i}`} className="flex-1 max-w-[60px] opacity-0" />;
+                       return (<div key={note.name} className="absolute pointer-events-auto" style={{ left: `calc(2rem + ${[1,2, 4,5,6].indexOf(NOTES.filter(n=>n.isBlack).indexOf(note)) * (100/7)}% + ${(100/7)/2}%)`, width: 'calc(100% / 7 * 0.6)', transform: 'translateX(-50%)' }}><div onMouseDown={() => playNote(note)} className={`w-full h-full bg-slate-900 rounded-b-md border border-slate-950 cursor-pointer select-none transition-colors duration-75 flex items-end justify-center pb-2 text-slate-500 text-xs font-bold ${activeKeys.has(note.key) ? 'bg-slate-700' : 'hover:bg-slate-800'}`}>{note.key.toUpperCase()}</div></div>)
+                     })}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        }
+
+        function WinView({ level, navigate }) {
+          return (
+          <div className="h-full flex flex-col items-center justify-center text-center space-y-6"><div className="w-24 h-24 bg-green-500/20 rounded-full flex items-center justify-center"><Ic n="zap" s={48} c="text-green-400" /></div><h2 className="text-5xl font-black text-white">CLASS DISMISSED!</h2><p className="text-xl text-slate-300">You completed {level.subject}.</p><div className="bg-slate-800 p-6 rounded-2xl border border-green-500/50 mt-8 animate-pulse flex items-center gap-4"><Ic n="wind" s={40} c="text-green-400" /><div className="text-left"><p className="text-sm text-slate-400">Bounty Claimed</p><p className="text-3xl font-bold text-green-400">+{level.reward} Reeds</p></div></div><button onClick={() => navigate('levelSelect')} className="mt-8 bg-cyan-600 text-white px-8 py-3 rounded-full font-bold hover:bg-cyan-500 transition">Next Class</button></div>
+        )}
+        
+        function LoseView({ level, navigate }) {
+          return (
+          <div className="h-full flex flex-col items-center justify-center text-center space-y-6"><div className="w-24 h-24 bg-red-500/20 rounded-full flex items-center justify-center"><Ic n="shieldAlert" s={48} c="text-red-500" /></div><h2 className="text-5xl font-black text-red-500">DETENTION EXTENDED</h2><p className="text-xl text-slate-300">You failed {level.subject}.</p><button onClick={() => navigate('game')} className="mt-8 bg-red-600 text-white px-8 py-3 rounded-full font-bold hover:bg-red-500 transition">Try Again</button><button onClick={() => navigate('menu')} className="text-slate-400 hover:text-white">Back to Menu</button></div>
+        )}
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

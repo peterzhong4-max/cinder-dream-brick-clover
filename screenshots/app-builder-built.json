@@ -1,0 +1,38 @@
+{
+  "url": "http://127.0.0.1:8081/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Symphonic Detention",
+      "hasCanvas": false,
+      "bodyTextLen": 256,
+      "bodyTextHash": "6d887a828933d3d09de38daa39282977804d723ae61259ac8de612f69a3a25ea",
+      "bodyTextPrefix": "Symphonic Detention 0 Battle of the Band Detention is a battlefi",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Symphonic Detention",
+      "hasCanvas": false,
+      "bodyTextLen": 256,
+      "bodyTextHash": "6d887a828933d3d09de38daa39282977804d723ae61259ac8de612f69a3a25ea",
+      "bodyTextPrefix": "Symphonic Detention 0 Battle of the Band Detention is a battlefi",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-built.json",
+  "divergesFromBaseline": false,
+  "baselineReasons": []
+}
